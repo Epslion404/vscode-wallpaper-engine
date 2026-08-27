@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import { WallpaperType } from '../core/types';
 import {
+    isPendingConfirmationFresh,
+    shouldConfirmPendingSetup,
     WallpaperSetupError,
     WallpaperSetupInput,
     WallpaperSetupStage,
@@ -27,11 +29,13 @@ suite('Wallpaper Setup Test Suite', () => {
         const result = await runWallpaperSetup(input, {
             validateMedia: async () => { calls.push('validate'); },
             startServer: async () => { calls.push('server'); },
+            verifyHealth: async () => { calls.push('health'); },
             verifyEntry: async () => { calls.push('verify'); },
             applyTransparency: async () => { calls.push('transparency'); },
             inject: async () => { calls.push('inject'); },
             updateWallpaperId: async id => { calls.push(`config:${id}`); },
             savePendingConfirmation: async confirmation => { calls.push(`confirm:${confirmation.wallpaperId}`); },
+            reloadWorkbench: async () => { calls.push('reload'); },
             rollback: async () => { calls.push('rollback'); },
             report: stage => { calls.push(`stage:${stage}`); },
             createOperationId: () => 'operation-1',
@@ -44,6 +48,8 @@ suite('Wallpaper Setup Test Suite', () => {
             'validate',
             `stage:${WallpaperSetupStage.StartServer}`,
             'server',
+            `stage:${WallpaperSetupStage.VerifyHealth}`,
+            'health',
             `stage:${WallpaperSetupStage.VerifyEntry}`,
             'verify',
             `stage:${WallpaperSetupStage.ApplyTransparency}`,
@@ -52,7 +58,9 @@ suite('Wallpaper Setup Test Suite', () => {
             'inject',
             `stage:${WallpaperSetupStage.SaveConfiguration}`,
             'config:123',
-            'confirm:123'
+            'confirm:123',
+            `stage:${WallpaperSetupStage.ReloadWorkbench}`,
+            'reload'
         ]);
     });
 
@@ -63,11 +71,13 @@ suite('Wallpaper Setup Test Suite', () => {
             runWallpaperSetup(input, {
                 validateMedia: async () => { calls.push('validate'); },
                 startServer: async () => { throw new Error('端口被占用'); },
+                verifyHealth: async () => { calls.push('health'); },
                 verifyEntry: async () => { calls.push('verify'); },
                 applyTransparency: async () => { calls.push('transparency'); },
                 inject: async () => { calls.push('inject'); },
                 updateWallpaperId: async () => { calls.push('config'); },
                 savePendingConfirmation: async () => { calls.push('confirm'); },
+                reloadWorkbench: async () => { calls.push('reload'); },
                 rollback: async () => { calls.push('rollback'); },
                 report: stage => { calls.push(`stage:${stage}`); },
                 createOperationId: () => 'operation-2',
@@ -96,11 +106,13 @@ suite('Wallpaper Setup Test Suite', () => {
             runWallpaperSetup(input, {
                 validateMedia: async () => undefined,
                 startServer: async () => undefined,
+                verifyHealth: async () => undefined,
                 verifyEntry: async () => undefined,
                 applyTransparency: async () => undefined,
                 inject: async () => { throw new Error('无法写入 Workbench'); },
                 updateWallpaperId: async () => undefined,
                 savePendingConfirmation: async () => undefined,
+                reloadWorkbench: async () => undefined,
                 rollback: async () => { throw new Error('回滚失败'); },
                 report: () => undefined,
                 createOperationId: () => 'operation-3',
@@ -116,5 +128,149 @@ suite('Wallpaper Setup Test Suite', () => {
                 return true;
             }
         );
+    });
+
+    test('classifies configuration commit failure and restores the previous configuration and server', async () => {
+        let wallpaperId = 'old-wallpaper';
+        let serverRoot = 'D:/wallpapers/old-wallpaper';
+        const calls: string[] = [];
+
+        await assert.rejects(
+            runWallpaperSetup(input, {
+                validateMedia: async () => undefined,
+                startServer: async setup => { serverRoot = setup.dirPath; },
+                verifyHealth: async () => undefined,
+                verifyEntry: async () => undefined,
+                applyTransparency: async () => undefined,
+                inject: async () => undefined,
+                updateWallpaperId: async id => {
+                    wallpaperId = id;
+                    throw new Error('无法保存配置');
+                },
+                savePendingConfirmation: async () => { calls.push('confirm'); },
+                reloadWorkbench: async () => { calls.push('reload'); },
+                rollback: async () => {
+                    wallpaperId = 'old-wallpaper';
+                    serverRoot = 'D:/wallpapers/old-wallpaper';
+                    calls.push('rollback');
+                },
+                report: () => undefined,
+                createOperationId: () => 'operation-config-failure',
+                now: () => 4000
+            }),
+            error => {
+                assert.ok(error instanceof WallpaperSetupError);
+                assert.strictEqual(error.stage, WallpaperSetupStage.SaveConfiguration);
+                assert.match(error.message, /无法保存配置/);
+                return true;
+            }
+        );
+
+        assert.strictEqual(wallpaperId, 'old-wallpaper');
+        assert.strictEqual(serverRoot, 'D:/wallpapers/old-wallpaper');
+        assert.deepStrictEqual(calls, ['rollback']);
+    });
+
+    test('classifies reload failure and rolls back committed configuration and pending confirmation', async () => {
+        let wallpaperId = 'old-wallpaper';
+        let serverRoot = 'D:/wallpapers/old-wallpaper';
+        let pendingWallpaperId: string | undefined;
+        const calls: string[] = [];
+
+        await assert.rejects(
+            runWallpaperSetup(input, {
+                validateMedia: async () => undefined,
+                startServer: async setup => { serverRoot = setup.dirPath; },
+                verifyHealth: async () => undefined,
+                verifyEntry: async () => undefined,
+                applyTransparency: async () => undefined,
+                inject: async () => undefined,
+                updateWallpaperId: async id => { wallpaperId = id; },
+                savePendingConfirmation: async confirmation => { pendingWallpaperId = confirmation.wallpaperId; },
+                reloadWorkbench: async () => { throw new Error('窗口重载命令失败'); },
+                rollback: async () => {
+                    wallpaperId = 'old-wallpaper';
+                    serverRoot = 'D:/wallpapers/old-wallpaper';
+                    pendingWallpaperId = undefined;
+                    calls.push('rollback');
+                },
+                report: stage => { calls.push(`stage:${stage}`); },
+                createOperationId: () => 'operation-reload-failure',
+                now: () => 5000
+            }),
+            error => {
+                assert.ok(error instanceof WallpaperSetupError);
+                assert.strictEqual(error.stage, WallpaperSetupStage.ReloadWorkbench);
+                assert.match(error.message, /窗口重载命令失败/);
+                return true;
+            }
+        );
+
+        assert.strictEqual(wallpaperId, 'old-wallpaper');
+        assert.strictEqual(serverRoot, 'D:/wallpapers/old-wallpaper');
+        assert.strictEqual(pendingWallpaperId, undefined);
+        assert.deepStrictEqual(calls.slice(-2), [`stage:${WallpaperSetupStage.ReloadWorkbench}`, 'rollback']);
+    });
+
+    test('keeps configuration commit failure when restoring the old state also fails', async () => {
+        await assert.rejects(
+            runWallpaperSetup(input, {
+                validateMedia: async () => undefined,
+                startServer: async () => undefined,
+                verifyHealth: async () => undefined,
+                verifyEntry: async () => undefined,
+                applyTransparency: async () => undefined,
+                inject: async () => undefined,
+                updateWallpaperId: async () => { throw new Error('配置提交失败'); },
+                savePendingConfirmation: async () => undefined,
+                reloadWorkbench: async () => undefined,
+                rollback: async () => { throw new Error('旧服务恢复失败'); },
+                report: () => undefined,
+                createOperationId: () => 'operation-double-failure',
+                now: () => 6000
+            }),
+            error => {
+                assert.ok(error instanceof WallpaperSetupError);
+                assert.strictEqual(error.stage, WallpaperSetupStage.SaveConfiguration);
+                assert.strictEqual(error.message, '配置提交失败');
+                assert.strictEqual(error.rollbackMessage, '旧服务恢复失败');
+                assert.ok(error.cause instanceof Error);
+                assert.strictEqual(error.cause.message, '配置提交失败');
+                return true;
+            }
+        );
+    });
+
+    test('accepts only recent pending confirmations', () => {
+        const confirmation = {
+            operationId: 'operation-4',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'index.html',
+            createdAt: 1000
+        };
+
+        assert.strictEqual(isPendingConfirmationFresh(confirmation, 1000), true);
+        assert.strictEqual(isPendingConfirmationFresh(confirmation, 1000 + 5 * 60 * 1000), true);
+        assert.strictEqual(isPendingConfirmationFresh(confirmation, 1000 + 5 * 60 * 1000 + 1), false);
+        assert.strictEqual(isPendingConfirmationFresh(confirmation, 999), false);
+    });
+
+    test('confirms pending setup only when wallpaper is unchanged and confirmation is fresh', () => {
+        const confirmation = {
+            operationId: 'operation-5',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'index.html',
+            createdAt: 1000
+        };
+
+        assert.strictEqual(shouldConfirmPendingSetup(confirmation, '123', 1000), true);
+        assert.strictEqual(shouldConfirmPendingSetup(confirmation, 'changed', 1000), false);
+        assert.strictEqual(shouldConfirmPendingSetup(confirmation, '123', 1000 + 5 * 60 * 1000 + 1), false);
+        assert.strictEqual(shouldConfirmPendingSetup({ ...confirmation, dirPath: '' }, '123', 1000), false);
+        assert.strictEqual(shouldConfirmPendingSetup({ ...confirmation, fileName: '' }, '123', 1000), false);
     });
 });

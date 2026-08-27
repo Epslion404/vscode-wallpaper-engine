@@ -187,8 +187,9 @@ export async function restoreWorkbench() {
             vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
 
-    } catch (e: any) {
-        vscode.window.showErrorMessage('还原失败: ' + e.message);
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage('还原失败: ' + message);
     }
 }
 

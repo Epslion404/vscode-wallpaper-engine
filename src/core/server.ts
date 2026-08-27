@@ -21,6 +21,59 @@ export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupT
 const SERVER_STARTUP_TIMEOUT_MS = 5000;
 const SERVER_PREFLIGHT_TIMEOUT_MS = 3000;
 
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
+type ProjectProperties = Record<string, JsonObject>;
+
+function isJsonValue(value: unknown): value is JsonValue {
+    if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        return true;
+    }
+    if (Array.isArray(value)) {
+        return value.every(isJsonValue);
+    }
+    return typeof value === 'object'
+        && value !== null
+        && Object.values(value).every(isJsonValue);
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+    return isJsonValue(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readProjectJson(filePath: string): JsonObject | undefined {
+    try {
+        const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        return isJsonObject(parsed) ? parsed : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function readProjectProperties(content: JsonObject): ProjectProperties {
+    const candidate = isJsonObject(content.properties)
+        ? content.properties
+        : isJsonObject(content.general) && isJsonObject(content.general.properties)
+            ? content.general.properties
+            : undefined;
+    if (!candidate) {
+        return {};
+    }
+
+    const properties: ProjectProperties = {};
+    for (const [key, value] of Object.entries(candidate)) {
+        if (isJsonObject(value)) {
+            properties[key] = value;
+        }
+    }
+    return properties;
+}
+
+function readProjectPreset(content: JsonObject): JsonObject | undefined {
+    return isJsonObject(content.preset) ? content.preset : undefined;
+}
+
 export class WallpaperServer {
     private server: http.Server | null = null;
     private wss: WebSocketServer | null = null;
@@ -30,6 +83,7 @@ export class WallpaperServer {
 
     private searchPaths: string[] = [];
     private reloadFlag = false; // [New] Flag to trigger client reload
+    private reloadWaiter: { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout } | null = null;
 
     private shutdownTimeout: NodeJS.Timeout | null = null;
     private readonly SHUTDOWN_DELAY = 2 * 60 * 1000; // 2 minutes
@@ -82,6 +136,25 @@ export class WallpaperServer {
         this.reloadFlag = true;
     }
 
+    /** 设置刷新标志，并等待壁纸客户端实际取走 205 信号。 */
+    public triggerReloadAndWait(timeoutMs = SERVER_PREFLIGHT_TIMEOUT_MS): Promise<void> {
+        if (this.reloadWaiter) {
+            return Promise.reject(new Error('已有壁纸刷新信号正在等待客户端确认'));
+        }
+        this.reloadFlag = true;
+        return new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                if (this.reloadWaiter?.timer !== timer) {
+                    return;
+                }
+                this.reloadWaiter = null;
+                this.reloadFlag = false;
+                reject(new Error(`壁纸刷新信号确认超时（${timeoutMs} 毫秒）`));
+            }, timeoutMs);
+            this.reloadWaiter = { resolve, reject, timer };
+        });
+    }
+
     private checkServerStatus(port: number): Promise<{ running: boolean, rootPath: string, entryFile?: string | null } | null> {
         return new Promise((resolve) => {
             const req = http.get(`http://127.0.0.1:${port}/status`, { agent: false }, (res) => {
@@ -93,7 +166,20 @@ export class WallpaperServer {
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
                     try {
-                        resolve(JSON.parse(data));
+                        const parsed: unknown = JSON.parse(data);
+                        if (isJsonObject(parsed)
+                            && typeof parsed.running === 'boolean'
+                            && typeof parsed.rootPath === 'string') {
+                            resolve({
+                                running: parsed.running,
+                                rootPath: parsed.rootPath,
+                                entryFile: typeof parsed.entryFile === 'string' || parsed.entryFile === null
+                                    ? parsed.entryFile
+                                    : undefined
+                            });
+                        } else {
+                            resolve(null);
+                        }
                     } catch {
                         resolve(null);
                     }
@@ -244,7 +330,14 @@ export class WallpaperServer {
                     console.log('[Server] Sending 205 Reload signal to client');
                     this.reloadFlag = false;
                     res.statusCode = 205; // Reset Content
-                    res.end('reload');
+                    res.end('reload', () => {
+                        if (this.reloadWaiter) {
+                            clearTimeout(this.reloadWaiter.timer);
+                            const waiter = this.reloadWaiter;
+                            this.reloadWaiter = null;
+                            waiter.resolve();
+                        }
+                    });
                 } else {
                     res.statusCode = 200;
                     res.end('pong');
@@ -485,18 +578,22 @@ ${baseTag}
                 const propName = urlObj.searchParams.get("prop");
                 
                 // 1. Read project.json (merged)
-                let finalProps: any = {};
+                const finalProps: ProjectProperties = {};
                 for (let i = this.searchPaths.length - 1; i >= 0; i--) {
                     const pPath = path.join(this.searchPaths[i], "project.json");
                     if (fs.existsSync(pPath)) {
                         try {
-                            const content = JSON.parse(fs.readFileSync(pPath, "utf-8"));
-                            const props = content.properties || (content.general && content.general.properties) || {};
+                            const content = readProjectJson(pPath);
+                            if (!content) {
+                                continue;
+                            }
+                            const props = readProjectProperties(content);
                             Object.assign(finalProps, props);
-                            if (content.preset) {
-                                Object.keys(content.preset).forEach((key: string) => {
+                            const preset = readProjectPreset(content);
+                            if (preset) {
+                                Object.keys(preset).forEach((key: string) => {
                                     if (finalProps[key]) {
-                                        finalProps[key].value = content.preset[key];
+                                        finalProps[key].value = preset[key];
                                     }
                                 });
                             }
@@ -505,14 +602,17 @@ ${baseTag}
                 }
 
                 let targetPath: string | null = null;
-                let prop = finalProps[propName || ''];
+                let prop: JsonObject | undefined = finalProps[propName || ''];
                 if (!prop && propName) {
                     const key = Object.keys(finalProps).find(k => k.toLowerCase() === propName.toLowerCase());
                     if (key) { prop = finalProps[key]; }
                 }
                 
                 if (prop) {
-                    targetPath = prop.value || prop.default;
+                    const candidate = prop.value ?? prop.default;
+                    if (typeof candidate === 'string') {
+                        targetPath = candidate;
+                    }
                 }
 
                 let fileUrl = null;
@@ -647,8 +747,8 @@ ${baseTag}
 
             // [New] API: Serve processed project.json (with presets applied)
             if (reqUrl === '/project.json') {
-                let finalProject: any = {};
-                let finalProps: any = {};
+                const finalProject: JsonObject = {};
+                const finalProps: ProjectProperties = {};
                 
                 // Merge from dependencies (reverse order)
                 for (let i = this.searchPaths.length - 1; i >= 0; i--) {
@@ -656,21 +756,25 @@ ${baseTag}
                     if (fs.existsSync(pPath)) {
                         try {
                             console.log(`[add set] Parsing project.json at ${pPath}`);
-                            const content = JSON.parse(fs.readFileSync(pPath, "utf-8"));
+                            const content = readProjectJson(pPath);
+                            if (!content) {
+                                continue;
+                            }
                             console.log(`[add set] Merging content from ${pPath}`);
                             Object.assign(finalProject, content);
                             
-                            const props = content.properties || (content.general && content.general.properties) || {};
+                            const props = readProjectProperties(content);
                             console.log(`[add set] Found properties: ${Object.keys(props).map(k => `${k}=${props[k].value ?? props[k].default}`).join(', ')}`);
                             Object.assign(finalProps, props);
                             
-                            if (content.preset) {
-                                console.log(`[add set] Found presets: ${Object.keys(content.preset).join(', ')}`);
-                                Object.keys(content.preset).forEach((key: string) => {
+                            const preset = readProjectPreset(content);
+                            if (preset) {
+                                console.log(`[add set] Found presets: ${Object.keys(preset).join(', ')}`);
+                                Object.keys(preset).forEach((key: string) => {
                                     if (finalProps[key]) {
-                                        console.log(`[add set] Applying preset for ${key}: ${content.preset[key]}`);
-                                        finalProps[key].value = content.preset[key];
-                                        finalProps[key].default = content.preset[key];
+                                        console.log(`[add set] Applying preset for ${key}: ${preset[key]}`);
+                                        finalProps[key].value = preset[key];
+                                        finalProps[key].default = preset[key];
                                     }
                                 });
                             }
@@ -680,8 +784,9 @@ ${baseTag}
                     }
                 }
                 
-                if (!finalProject.general) { finalProject.general = {}; }
-                finalProject.general.properties = finalProps;
+                const general = isJsonObject(finalProject.general) ? finalProject.general : {};
+                general.properties = finalProps;
+                finalProject.general = general;
                 
                 res.setHeader('Content-Type', 'application/json');
                 res.setHeader('Access-Control-Allow-Origin', '*');
@@ -812,7 +917,10 @@ ${baseTag}
         console.log(`[server launch] Wallpaper Server started on port ${this.PORT}${silent ? ' (silent)' : ''}`);
     }
 
-    public async verifyHealth(timeoutMs = SERVER_PREFLIGHT_TIMEOUT_MS): Promise<void> {
+    public async verifyHealth(
+        timeoutMs = SERVER_PREFLIGHT_TIMEOUT_MS,
+        expected?: { rootPath: string; entryFile: string }
+    ): Promise<void> {
         let response;
         try {
             response = await requestLocalEndpoint(this.PORT, '/status', timeoutMs);
@@ -823,9 +931,17 @@ ${baseTag}
             throw new WallpaperPreflightError('health', `壁纸服务器健康检查返回 HTTP ${response.statusCode}`);
         }
         try {
-            const status = JSON.parse(response.body) as { running?: boolean };
+            const status = JSON.parse(response.body) as { running?: boolean; rootPath?: string; entryFile?: string | null };
             if (status.running !== true) {
                 throw new Error('running 状态无效');
+            }
+            if (expected) {
+                if (path.resolve(status.rootPath || '') !== path.resolve(expected.rootPath)) {
+                    throw new Error('rootPath 与待确认壁纸不一致');
+                }
+                if ((status.entryFile || '') !== expected.entryFile) {
+                    throw new Error('entryFile 与待确认壁纸不一致');
+                }
             }
         } catch (error) {
             throw new WallpaperPreflightError('health', '壁纸服务器健康检查响应无效', { cause: error });
@@ -880,11 +996,15 @@ ${baseTag}
                 const projPath = path.join(currPath, "project.json");
                 if (fs.existsSync(projPath)) {
                     try {
-                        const proj = JSON.parse(fs.readFileSync(projPath, "utf-8"));
+                        const proj = readProjectJson(projPath);
+                        if (!proj) {
+                            continue;
+                        }
                         let deps: string[] = [];
                         if (typeof proj.dependency === "string") {
                             deps = [proj.dependency];
-                        } else if (Array.isArray(proj.dependency)) {
+                        } else if (Array.isArray(proj.dependency)
+                            && proj.dependency.every((dependency): dependency is string => typeof dependency === 'string')) {
                             deps = proj.dependency;
                         }
                         
@@ -940,10 +1060,17 @@ ${baseTag}
                 activeServer.close(error => error ? reject(error) : resolve());
             });
         }
+        if (this.reloadWaiter) {
+            clearTimeout(this.reloadWaiter.timer);
+            const waiter = this.reloadWaiter;
+            this.reloadWaiter = null;
+            this.reloadFlag = false;
+            waiter.reject(new Error('壁纸服务器已停止，刷新信号未被客户端确认'));
+        }
         console.log('[Server] Server stopped.');
     }
 
-    public broadcast(data: any) {
+    public broadcast(data: JsonValue) {
         if (this.wss) {
             const msg = JSON.stringify(data);
             this.wss.clients.forEach(client => {

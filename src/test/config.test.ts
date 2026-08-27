@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { validateConfig } from '../config';
+import { getConfigValidationError, validateConfig } from '../config';
 
 suite('Config Test Suite', () => {
     test('validateConfig should return false for empty path', () => {
@@ -17,6 +17,7 @@ suite('Config Test Suite', () => {
         };
         const result = validateConfig(config);
         assert.strictEqual(result, false);
+        assert.match(getConfigValidationError(config) ?? '', /创意工坊目录/);
     });
 
     test('validateConfig should reject a file path', () => {

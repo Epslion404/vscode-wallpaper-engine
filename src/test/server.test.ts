@@ -153,4 +153,36 @@ suite('WallpaperServer lifecycle and preflight', () => {
         await server.stop();
         await assert.rejects(server.verifyHealth(100), /健康检查/);
     });
+
+    test('health verification rejects a service for a different wallpaper', async () => {
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+
+        await assert.rejects(
+            server.verifyHealth(100, { rootPath: path.join(root, 'other'), entryFile: 'index.html' }),
+            /健康检查响应无效/
+        );
+        await assert.rejects(
+            server.verifyHealth(100, { rootPath: root, entryFile: 'other.html' }),
+            /健康检查响应无效/
+        );
+    });
+
+    test('reload confirmation resolves only after a client consumes the signal', async () => {
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+
+        const confirmation = server.triggerReloadAndWait(1000);
+        const response = await fetch(`http://127.0.0.1:${server.getCurrentInfo().port}/ping`);
+
+        assert.strictEqual(response.status, 205);
+        await confirmation;
+    });
+
+    test('reload confirmation rejects when no client consumes the signal', async () => {
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+
+        await assert.rejects(server.triggerReloadAndWait(20), /刷新信号.*超时/);
+    });
 });

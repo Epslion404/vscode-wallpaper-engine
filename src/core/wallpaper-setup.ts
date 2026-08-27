@@ -1,13 +1,20 @@
 import { WallpaperType } from './types';
 
 export enum WallpaperSetupStage {
+    ValidateConfiguration = 'validateConfiguration',
+    ScanLibrary = 'scanLibrary',
+    SelectWallpaper = 'selectWallpaper',
     ValidateMedia = 'validateMedia',
     StartServer = 'startServer',
+    VerifyHealth = 'verifyHealth',
     VerifyEntry = 'verifyEntry',
     ApplyTransparency = 'applyTransparency',
     InjectWorkbench = 'injectWorkbench',
-    SaveConfiguration = 'saveConfiguration'
+    SaveConfiguration = 'saveConfiguration',
+    ReloadWorkbench = 'reloadWorkbench'
 }
+
+export const PENDING_SETUP_CONFIRMATION_KEY = 'pendingSetupConfirmation';
 
 export interface WallpaperSetupInput {
     wallpaperId: string;
@@ -27,6 +34,8 @@ export interface PendingSetupConfirmation {
     operationId: string;
     wallpaperId: string;
     wallpaperTitle: string;
+    dirPath: string;
+    fileName: string;
     createdAt: number;
 }
 
@@ -35,15 +44,23 @@ export interface WallpaperSetupResult {
     confirmation: PendingSetupConfirmation;
 }
 
+export type WallpaperSetupViewState =
+    | { status: 'idle'; message: string }
+    | { status: 'running'; stage: WallpaperSetupStage; message: string }
+    | { status: 'success'; message: string }
+    | { status: 'error'; stage: WallpaperSetupStage; message: string };
+
 export interface WallpaperSetupDependencies {
-    validateMedia(input: WallpaperSetupInput): Promise<void>;
-    startServer(input: WallpaperSetupInput): Promise<void>;
-    verifyEntry(input: WallpaperSetupInput): Promise<void>;
-    applyTransparency(): Promise<void>;
-    inject(input: WallpaperSetupInput): Promise<void>;
-    updateWallpaperId(wallpaperId: string): Promise<void>;
-    savePendingConfirmation(confirmation: PendingSetupConfirmation): Promise<void>;
-    rollback(): Promise<void>;
+    validateMedia(input: WallpaperSetupInput): PromiseLike<void>;
+    startServer(input: WallpaperSetupInput): PromiseLike<void>;
+    verifyHealth(input: WallpaperSetupInput): PromiseLike<void>;
+    verifyEntry(input: WallpaperSetupInput): PromiseLike<void>;
+    applyTransparency(): PromiseLike<void>;
+    inject(input: WallpaperSetupInput): PromiseLike<void>;
+    updateWallpaperId(wallpaperId: string): PromiseLike<void>;
+    savePendingConfirmation(confirmation: PendingSetupConfirmation): PromiseLike<void>;
+    reloadWorkbench(): PromiseLike<void>;
+    rollback(): PromiseLike<void>;
     report(stage: WallpaperSetupStage, input: WallpaperSetupInput): void;
     createOperationId(): string;
     now(): number;
@@ -78,7 +95,8 @@ export async function runWallpaperSetup(
     dependencies: WallpaperSetupDependencies
 ): Promise<WallpaperSetupResult> {
     let stage = WallpaperSetupStage.ValidateMedia;
-    const runStage = async (nextStage: WallpaperSetupStage, action: () => Promise<void>) => {
+    const operationId = dependencies.createOperationId();
+    const runStage = async (nextStage: WallpaperSetupStage, action: () => PromiseLike<void>) => {
         stage = nextStage;
         dependencies.report(stage, input);
         await action();
@@ -87,19 +105,23 @@ export async function runWallpaperSetup(
     try {
         await runStage(WallpaperSetupStage.ValidateMedia, () => dependencies.validateMedia(input));
         await runStage(WallpaperSetupStage.StartServer, () => dependencies.startServer(input));
+        await runStage(WallpaperSetupStage.VerifyHealth, () => dependencies.verifyHealth(input));
         await runStage(WallpaperSetupStage.VerifyEntry, () => dependencies.verifyEntry(input));
         await runStage(WallpaperSetupStage.ApplyTransparency, () => dependencies.applyTransparency());
         await runStage(WallpaperSetupStage.InjectWorkbench, () => dependencies.inject(input));
         await runStage(WallpaperSetupStage.SaveConfiguration, () => dependencies.updateWallpaperId(input.wallpaperId));
 
         const confirmation: PendingSetupConfirmation = {
-            operationId: dependencies.createOperationId(),
+            operationId,
             wallpaperId: input.wallpaperId,
             wallpaperTitle: input.wallpaperTitle,
+            dirPath: input.dirPath,
+            fileName: input.fileName,
             createdAt: dependencies.now()
         };
         await dependencies.savePendingConfirmation(confirmation);
-        return { operationId: confirmation.operationId, confirmation };
+        await runStage(WallpaperSetupStage.ReloadWorkbench, () => dependencies.reloadWorkbench());
+        return { operationId, confirmation };
     } catch (error) {
         const setupError = asSetupError(stage, error);
         try {
@@ -117,4 +139,20 @@ export function isPendingConfirmationFresh(
     maxAgeMs = 5 * 60 * 1000
 ): boolean {
     return confirmation.createdAt <= now && now - confirmation.createdAt <= maxAgeMs;
+}
+
+export function shouldConfirmPendingSetup(
+    confirmation: PendingSetupConfirmation,
+    currentWallpaperId: string,
+    now: number,
+    maxAgeMs = 5 * 60 * 1000
+): boolean {
+    return typeof confirmation === 'object'
+        && confirmation !== null
+        && typeof confirmation.dirPath === 'string'
+        && confirmation.dirPath.length > 0
+        && typeof confirmation.fileName === 'string'
+        && confirmation.fileName.length > 0
+        && confirmation.wallpaperId === currentWallpaperId
+        && isPendingConfirmationFresh(confirmation, now, maxAgeMs);
 }

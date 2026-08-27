@@ -15,9 +15,10 @@ export function saveFilePrivileged(filePath: string, content: string): Promise<v
             fs.writeFileSync(filePath, content, 'utf-8');
             resolve();
             return;
-        } catch (err: any) {
+        } catch (err: unknown) {
             // 如果不是权限问题，直接抛出错误
-            if (err.code !== 'EPERM' && err.code !== 'EACCES') {
+            const code = typeof err === 'object' && err !== null && 'code' in err ? err.code : undefined;
+            if (code !== 'EPERM' && code !== 'EACCES') {
                 reject(err);
                 return;
             }

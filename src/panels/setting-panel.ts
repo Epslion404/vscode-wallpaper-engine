@@ -3,9 +3,119 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WallpaperServer } from '../core/server';
 import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch } from '../core/config-patcher';
+import { WallpaperSetupViewState } from '../core/wallpaper-setup';
+import { toUserErrorReason } from '../core/user-message';
+
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+export type SettingsPanelMessage =
+    | { command: 'ready' }
+    | { command: 'refresh' }
+    | { command: 'switch' }
+    | { command: 'openBrowser' }
+    | { command: 'openFolder' }
+    | { command: 'stopServer' }
+    | { command: 'editCustomCss' }
+    | { command: 'updateProp'; key: string; value: JsonValue }
+    | { command: 'updateGeneral'; key: string; value: JsonValue }
+    | { command: 'updateCss'; customCss: string }
+    | { command: 'updateTransparencyRules'; rules: Record<string, number> }
+    | { command: 'toggleTransparency'; enabled: boolean }
+    | { command: 'updateTransparencyBaseColor'; color: string };
+
+type CommandWithoutPayload = Extract<SettingsPanelMessage, { command:
+    | 'ready'
+    | 'refresh'
+    | 'switch'
+    | 'openBrowser'
+    | 'openFolder'
+    | 'stopServer'
+    | 'editCustomCss'
+}>['command'];
+
+const COMMANDS_WITHOUT_PAYLOAD = new Set<string>([
+    'ready',
+    'refresh',
+    'switch',
+    'openBrowser',
+    'openFolder',
+    'stopServer',
+    'editCustomCss',
+]);
+
+function isCommandWithoutPayload(command: string): command is CommandWithoutPayload {
+    return COMMANDS_WITHOUT_PAYLOAD.has(command);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+        return true;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value);
+    }
+    if (Array.isArray(value)) {
+        return value.every(isJsonValue);
+    }
+    if (isRecord(value)) {
+        return Object.keys(value).every((key) => key !== '__proto__' && key !== 'constructor' && key !== 'prototype' && isJsonValue(value[key]));
+    }
+    return false;
+}
+
+function isSafeKey(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= 256 && value !== '__proto__' && value !== 'constructor' && value !== 'prototype';
+}
+
+function isTransparencyRules(value: unknown): value is Record<string, number> {
+    if (!isRecord(value)) {
+        return false;
+    }
+    return Object.keys(value).every((key) => {
+        const ruleValue = value[key];
+        return isSafeKey(key) && typeof ruleValue === 'number' && Number.isFinite(ruleValue) && ruleValue >= 0 && ruleValue <= 1;
+    });
+}
+
+/** 将 Webview 外部消息解析为受约束的命令联合类型；非法消息直接丢弃。 */
+export function parseSettingsPanelMessage(message: unknown): SettingsPanelMessage | undefined {
+    if (!isRecord(message) || typeof message.command !== 'string') {
+        return undefined;
+    }
+
+    const command = message.command;
+    if (isCommandWithoutPayload(command)) {
+        return { command };
+    }
+    if (command === 'updateProp' || command === 'updateGeneral') {
+        if (!isSafeKey(message.key) || !isJsonValue(message.value)) {
+            return undefined;
+        }
+        return { command, key: message.key, value: message.value };
+    }
+    if (command === 'updateCss') {
+        return typeof message.customCss === 'string' ? { command, customCss: message.customCss } : undefined;
+    }
+    if (command === 'updateTransparencyRules') {
+        return isTransparencyRules(message.rules) ? { command, rules: message.rules } : undefined;
+    }
+    if (command === 'toggleTransparency') {
+        return typeof message.enabled === 'boolean' ? { command, enabled: message.enabled } : undefined;
+    }
+    if (command === 'updateTransparencyBaseColor') {
+        return typeof message.color === 'string' ? { command, color: message.color } : undefined;
+    }
+    return undefined;
+}
 
 export class SettingsPanel {
     public static currentPanel: SettingsPanel | undefined;
+    private static setupState: WallpaperSetupViewState = { status: 'idle', message: '等待操作' };
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
 
@@ -37,6 +147,11 @@ export class SettingsPanel {
         SettingsPanel.currentPanel = new SettingsPanel(panel, extensionUri, server);
     }
 
+    public static publishSetupState(state: WallpaperSetupViewState): void {
+        SettingsPanel.setupState = state;
+        void SettingsPanel.currentPanel?._panel.webview.postMessage({ type: 'setupState', state });
+    }
+
     public dispose() {
         SettingsPanel.currentPanel = undefined;
         this._panel.dispose();
@@ -48,12 +163,19 @@ export class SettingsPanel {
 
     private _setWebviewMessageListener(webview: vscode.Webview) {
         webview.onDidReceiveMessage(
-            async (message: any) => {
+            async (rawMessage: unknown) => {
+                const message = parseSettingsPanelMessage(rawMessage);
+                if (!message) {
+                    console.warn('[Panel] Ignoring malformed webview message');
+                    return;
+                }
                 if (message.command === 'updateProp') {
                     this.server.broadcast({
                         type: 'UPDATE_PROPERTIES',
                         data: { [message.key]: { value: message.value } }
                     });
+                } else if (message.command === 'ready') {
+                    await webview.postMessage({ type: 'setupState', state: SettingsPanel.setupState });
                 } else if (message.command === 'updateGeneral') {
                     // Handle general settings (audio, mic, etc.)
                     // We'll send a specific message type for these
@@ -70,37 +192,43 @@ export class SettingsPanel {
                 } else if (message.command === 'openFolder') {
                     const root = this.server.getCurrentRoot();
                     if (root) {
-                        vscode.env.openExternal(vscode.Uri.file(root));
+                        await vscode.env.openExternal(vscode.Uri.file(root));
                     } else {
-                        vscode.window.showErrorMessage('No wallpaper loaded.');
+                        await vscode.window.showErrorMessage('当前没有已加载的壁纸。');
                     }
                 } else if (message.command === 'stopServer') {
-                    this.server.stop();
-                    vscode.window.showWarningMessage('Wallpaper Server stopped.');
+                    try {
+                        await this.server.stop();
+                        await vscode.window.showWarningMessage('壁纸服务已停止。');
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to stop wallpaper server:', error);
+                        await vscode.window.showErrorMessage(`停止壁纸服务失败：${toUserErrorReason(error)}`);
+                    }
                 } else if (message.command === 'editCustomCss') {
-                    vscode.commands.executeCommand('vscode-wallpaper-engine.editCustomCss');
+                    await vscode.commands.executeCommand('vscode-wallpaper-engine.editCustomCss');
                 } else if (message.command === 'updateCss') {
                     const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
-                    
-                    vscode.window.showInformationMessage(`[CSS] Saving settings... Custom: ${message.customCss}`);
-                    
+
                     try {
-                        // 1. Update VS Code Config
                         await config.update('customCss', message.customCss, vscode.ConfigurationTarget.Global);
-                    } catch (e: any) {
-                        vscode.window.showErrorMessage(`[CSS] Config Update Failed: ${e.message}`);
-                        console.error('[CSS] Config Update Failed:', e);
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to save custom CSS:', error);
+                        await vscode.window.showErrorMessage(`保存自定义样式失败：${toUserErrorReason(error)}`);
+                        return;
                     }
 
-                    // 2. Update Server Config (Hot-Swap)
                     this.server.updateCssConfig({
                         customCss: message.customCss
                     });
-                    
-                    console.log('[Panel] Triggering server reload...');
-                    this.server.triggerReload();
 
-                    vscode.window.showInformationMessage('[CSS] Settings saved & Server updated. Hot-swap should trigger in ~2s.');
+                    try {
+                        console.log('[Panel] Waiting for the wallpaper client to confirm the CSS reload');
+                        await this.server.triggerReloadAndWait();
+                        await vscode.window.showInformationMessage('自定义样式已保存并应用。');
+                    } catch (error: unknown) {
+                        console.error('[Panel] Wallpaper client did not confirm the CSS reload:', error);
+                        await vscode.window.showWarningMessage('自定义样式已保存，但壁纸客户端未确认刷新，请手动刷新壁纸。');
+                    }
                 } else if (message.command === 'updateTransparencyRules') {
                     const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
                     try {
@@ -109,9 +237,10 @@ export class SettingsPanel {
                         
                         await config.update('transparencyRules', message.rules, target);
                         await applyTransparencyPatch(target);
-                        vscode.window.showInformationMessage('Transparency rules updated.');
-                    } catch (e: any) {
-                        vscode.window.showErrorMessage(`Failed to update transparency rules: ${e.message}`);
+                        await vscode.window.showInformationMessage('透明化规则已更新。');
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to update transparency rules:', error);
+                        await vscode.window.showErrorMessage(`更新透明化规则失败：${toUserErrorReason(error)}`);
                     }
                 } else if (message.command === 'toggleTransparency') {
                     const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
@@ -121,9 +250,10 @@ export class SettingsPanel {
 
                         await config.update('transparencyEnabled', message.enabled, target);
                         await applyTransparencyPatch(target);
-                        vscode.window.showInformationMessage(`Transparency ${message.enabled ? 'Enabled' : 'Disabled'}.`);
-                    } catch (e: any) {
-                        vscode.window.showErrorMessage(`Failed to toggle transparency: ${e.message}`);
+                        await vscode.window.showInformationMessage(`透明化已${message.enabled ? '启用' : '关闭'}。`);
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to toggle transparency:', error);
+                        await vscode.window.showErrorMessage(`切换透明化失败：${toUserErrorReason(error)}`);
                     }
                 } else if (message.command === 'updateTransparencyBaseColor') {
                     const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
@@ -133,9 +263,10 @@ export class SettingsPanel {
 
                         await config.update('transparencyBaseColor', message.color, target);
                         await applyTransparencyPatch(target);
-                        vscode.window.showInformationMessage('Transparency base color updated.');
-                    } catch (e: any) {
-                        vscode.window.showErrorMessage(`Failed to update base color: ${e.message}`);
+                        await vscode.window.showInformationMessage('透明化基色已更新。');
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to update transparency base color:', error);
+                        await vscode.window.showErrorMessage(`更新透明化基色失败：${toUserErrorReason(error)}`);
                     }
                 }
             },
@@ -148,7 +279,7 @@ export class SettingsPanel {
         const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
         const port = config.get<number>('serverPort') || 23333;
         const customCss = config.get<string>('customCss') || '';
-        const transparencyRules = config.get<any>('transparencyRules') || {};
+        const transparencyRules = config.get<Record<string, number>>('transparencyRules') || {};
         const transparencyEnabled = config.get<boolean>('transparencyEnabled') ?? true;
         const transparencyBaseColor = config.get<string>('transparencyBaseColor') || '';
 

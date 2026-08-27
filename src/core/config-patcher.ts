@@ -261,22 +261,22 @@ function getTargetCustomizations(
     }
 
     // ---- Helper: 规范化颜色字符串，返回 #RRGGBB 或 undefined ----
-    function normalizeColorString(input: any): string | undefined {
+    function normalizeColorString(input: unknown): string | undefined {
         if (!input || typeof input !== 'string') { return undefined; }
-        input = input.trim();
+        const value = input.trim();
         // Hex #RRGGBB or #RGB or #RRGGBBAA
-        if (/^#[0-9A-Fa-f]{6}$/.test(input)) { return input.toUpperCase(); }
-        if (/^#[0-9A-Fa-f]{3}$/.test(input)) {
-            const r = input[1];
-            const g = input[2];
-            const b = input[3];
+        if (/^#[0-9A-Fa-f]{6}$/.test(value)) { return value.toUpperCase(); }
+        if (/^#[0-9A-Fa-f]{3}$/.test(value)) {
+            const r = value[1];
+            const g = value[2];
+            const b = value[3];
             return `#${r}${r}${g}${g}${b}${b}`.toUpperCase();
         }
-        if (/^#[0-9A-Fa-f]{8}$/.test(input)) {
-            return input.substring(0, 7).toUpperCase();
+        if (/^#[0-9A-Fa-f]{8}$/.test(value)) {
+            return value.substring(0, 7).toUpperCase();
         }
         // rgba(...) or rgb(...)
-        const rgba = input.match(/rgba?\(([^)]+)\)/i);
+        const rgba = value.match(/rgba?\(([^)]+)\)/i);
         if (rgba) {
             const parts = rgba[1].split(',').map((p: string) => p.trim());
             if (parts.length >= 3) {

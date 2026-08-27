@@ -8,11 +8,15 @@
     <link href="{{styleUri}}" rel="stylesheet" />
 </head>
 <body>
+    <div id="setup-status" class="setup-status" data-status="idle" role="status" aria-live="polite">
+        <span id="setup-status-icon" class="setup-status-icon">i</span>
+        <span id="setup-status-text">等待操作</span>
+    </div>
     <div class="toolbar">
-        <button id="btn-refresh" title="Reload Wallpaper">↻ Refresh</button>
-        <button id="btn-switch" title="Switch Wallpaper">📂 Switch</button>
-        <button id="btn-browser" title="Open in Browser">🌐 Browser</button>
-        <button id="btn-folder" title="Open Wallpaper Folder">📁 Folder</button>
+        <button id="btn-refresh" title="刷新壁纸">刷新</button>
+        <button id="btn-switch" title="设置壁纸">设置壁纸</button>
+        <button id="btn-browser" title="在浏览器中打开">浏览器</button>
+        <button id="btn-folder" title="打开壁纸目录">目录</button>
     </div>
 
     <div class="section-header">Server Status</div>

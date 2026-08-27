@@ -2,6 +2,27 @@ const vscode = acquireVsCodeApi();
 const SERVER_ROOT = document
   .getElementById("settings-script")
   .getAttribute("data-server-root");
+const setupStatusEl = document.getElementById("setup-status");
+const setupStatusIconEl = document.getElementById("setup-status-icon");
+const setupStatusTextEl = document.getElementById("setup-status-text");
+const switchButton = document.getElementById("btn-switch");
+
+function renderSetupState(state) {
+  const status = state && state.status ? state.status : "idle";
+  const icons = { idle: "i", running: "…", success: "✓", error: "!" };
+  setupStatusEl.dataset.status = status;
+  setupStatusIconEl.innerText = icons[status] || "i";
+  setupStatusTextEl.innerText = state.message || "等待操作";
+  switchButton.disabled = status === "running";
+}
+
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "setupState") {
+    renderSetupState(event.data.state);
+  }
+});
+
+vscode.postMessage({ command: "ready" });
 
 function updateProp(key, val) {
   vscode.postMessage({ command: "updateProp", key, value: val });

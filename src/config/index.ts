@@ -24,7 +24,7 @@ export function getConfiguration(): AppConfig {
     return { workshopPath, opacity, serverPort, wallpaperId, resizeDelay, startupCheckInterval, customCss };
 }
 
-export function validateConfig(config: AppConfig): boolean {
+export function getConfigValidationError(config: AppConfig): string | undefined {
     let isDirectory = false;
     if (config.workshopPath) {
         try {
@@ -35,8 +35,11 @@ export function validateConfig(config: AppConfig): boolean {
     }
 
     if (!config.workshopPath || !isDirectory) {
-        vscode.window.showErrorMessage('请先在设置中配置正确的 Wallpaper Engine 创意工坊目录！');
-        return false;
+        return '请先配置正确的 Wallpaper Engine 创意工坊目录。';
     }
-    return true;
+    return undefined;
+}
+
+export function validateConfig(config: AppConfig): boolean {
+    return getConfigValidationError(config) === undefined;
 }

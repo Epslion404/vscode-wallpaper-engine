@@ -2,6 +2,7 @@
 .vscode-test/**
 .github/**
 .planning/**
+.nexus-map/**
 assets/**
 demo/**
 docs/**
