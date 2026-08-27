@@ -140,13 +140,6 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.3"
   },
-  "files": [
-    "dist",
-    "media",
-    "package.json",
-    "README.md",
-    "CHANGELOG.md"
-  ],
   "dependencies": {
     "sudo-prompt": "^9.2.1",
     "ws": "^8.21.3"
