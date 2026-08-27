@@ -3,14 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { toVsCodeResourceUrl } from '../utils'; 
 import { saveFilePrivileged } from './admin-saver';
-import { WALLPAPER_SERVER_PORT } from '../config/constants';
 import { WallpaperType } from './types';
 
 // --- 常量定义 ---
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 
-// HTML 新 CSP 标记
+// HTML CSP 补丁标记
 const CSP_MARKER_START = '<!-- VSCode-Wallpaper-Injection-Start -->';
 const CSP_MARKER_END = '<!-- VSCode-Wallpaper-Injection-End -->';
 
@@ -18,59 +17,26 @@ const CSP_MARKER_END = '<!-- VSCode-Wallpaper-Injection-End -->';
 const ATTR_ORIGINAL = 'http-equiv="Content-Security-Policy"';
 const ATTR_RENAMED = 'http-equiv="Content-Security-Policy--replaced-by-wallpaper-engine-plugin"';
 
-// CSP abs content
-const CSP_ABS_CONTENT = `
-<meta charset="utf-8" />
-		<meta
-			http-equiv="Content-Security-Policy"
-			content="
-			default-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-			;
-			img-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				data:
-				blob:
-				vscode-remote-resource:
-				vscode-managed-remote-resource:
-				https:
-			;
-			media-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-			;
-			frame-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				vscode-webview:
-			;
-			script-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				'unsafe-eval'
-				blob:
-			;
-			style-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				'unsafe-inline'
-			;
-			connect-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				https:
-				ws:
-			;
-			font-src
-				* 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https: ws: wss:
-				'self'
-				vscode-remote-resource:
-				vscode-managed-remote-resource:
-				https://*.vscode-unpkg.net
-			;
-		"/>
-`;
+const LOCAL_SERVER_ORIGIN_PATTERN = /http:\/\/127\.0\.0\.1:\d+/g;
+
+function getWallpaperIframeSandbox(): string {
+    return 'allow-scripts';
+}
+
+function addSourceToDirective(content: string, directive: string, source: string): string {
+    const directivePattern = new RegExp(`(${directive}\\s+)([^;]*)(;)`, 'i');
+    return content.replace(directivePattern, (_match, prefix: string, sources: string, suffix: string) => {
+        const cleanedSources = sources.replace(LOCAL_SERVER_ORIGIN_PATTERN, '').replace(/\s+/g, ' ').trim();
+        return `${prefix}${cleanedSources} ${source}${suffix}`;
+    });
+}
+
+function stripLocalServerOriginsFromCsp(html: string): string {
+    const cspPattern = /(<meta[\s\S]*?http-equiv="Content-Security-Policy"[\s\S]*?content=")([\s\S]*?)("\s*\/?>)/i;
+    return html.replace(cspPattern, (_match, prefix: string, content: string, suffix: string) => {
+        return `${prefix}${content.replace(LOCAL_SERVER_ORIGIN_PATTERN, '').replace(/\s+/g, ' ').trim()}${suffix}`;
+    });
+}
 
 function getWorkbenchPath(file: 'html' | 'js'): string | null {
     const root = vscode.env.appRoot;
@@ -101,7 +67,7 @@ export function isPatched(): boolean {
 /**
  * [还原/卸载功能]
  * 1. JS: 清除注入代码
- * 2. HTML: 删除新插入的 CSP 块，将重命名的属性改回原样
+ * 2. HTML: 删除 CSP 补丁，并恢复原始策略
  */
 export async function restoreWorkbench() {
     const htmlPath = getWorkbenchPath('html');
@@ -113,20 +79,25 @@ export async function restoreWorkbench() {
             let html = fs.readFileSync(htmlPath, 'utf-8');
             let changed = false;
 
-            // A. 删除插入的新 CSP 块
-            // 匹配 
-            const blockRegex = new RegExp(`\\s*${escapeRegExp(CSP_MARKER_START)}[\\s\\S]*?${escapeRegExp(CSP_MARKER_END)}`, 'g');
-            if (html.match(blockRegex)) {
-                console.log("正在移除注入的 CSP...");
-                html = html.replace(blockRegex, '');
+            // A. 兼容清理旧版全开放 CSP 补丁。
+            const legacyBlockRegex = new RegExp(`\\s*${escapeRegExp(CSP_MARKER_START)}[\\s\\S]*?${escapeRegExp(CSP_MARKER_END)}`, 'g');
+            if (html.match(legacyBlockRegex)) {
+                console.log('正在移除注入的 CSP...');
+                html = html.replace(legacyBlockRegex, '');
                 changed = true;
             }
 
-            // B. 恢复原标签的属性名
+            // B. 恢复旧版被禁用的原 CSP 标签。
             if (html.includes(ATTR_RENAMED)) {
-                console.log("正在恢复原版 CSP 属性名...");
-                // 全局替换回原名
+                console.log('正在恢复原版 CSP 属性名...');
                 html = html.split(ATTR_RENAMED).join(ATTR_ORIGINAL);
+                changed = true;
+            }
+
+            // C. 移除新版 CSP 中仅为本地壁纸服务添加的来源。
+            const cleanedHtml = stripLocalServerOriginsFromCsp(html);
+            if (cleanedHtml !== html) {
+                html = cleanedHtml;
                 changed = true;
             }
 
@@ -156,48 +127,38 @@ export async function restoreWorkbench() {
 }
 
 /**
- * [安装/Patch 功能]
- * 1. 找到原 CSP 标签，重命名其属性使其失效
- * 2. 在其下方插入修改后的新 CSP 标签
+ * 仅允许 Workbench 连接并嵌入当前本地壁纸服务。
+ * 保留 VS Code 原有 CSP 的其他限制，包括 Trusted Types。
  */
-async function patchWorkbenchHtml() {
+async function patchWorkbenchHtml(port: number) {
     const targetHtml = getWorkbenchPath('html');
     if (!targetHtml) { return; }
 
     let html = fs.readFileSync(targetHtml, 'utf-8');
-    if (html.includes(ATTR_RENAMED)) { return; }
+
+    // 先迁移旧版全开放 CSP 补丁，恢复 VS Code 原始策略。
+    const legacyBlockRegex = new RegExp(`\\s*${escapeRegExp(CSP_MARKER_START)}[\\s\\S]*?${escapeRegExp(CSP_MARKER_END)}`, 'g');
+    html = stripLocalServerOriginsFromCsp(html.replace(legacyBlockRegex, '').split(ATTR_RENAMED).join(ATTR_ORIGINAL));
 
     const metaTagRegex = /<meta[\s\S\n]*?http-equiv="Content-Security-Policy"[\s\S\n]*?>/i;
     const match = html.match(metaTagRegex);
     if (!match) { return; }
 
     const originalTag = match[0];
-    const disabledTag = originalTag.replace(ATTR_ORIGINAL, ATTR_RENAMED);
-
-    let newTagContent = originalTag;
-    newTagContent = newTagContent.replace(/require-trusted-types-for[\s\S]*?'script'[\s\S]*?;/g, '');
-
     const contentRegex = /content="([\s\S]*?)"/i;
-    const contentMatch = newTagContent.match(contentRegex);
-    
-    if (contentMatch) {
-        const oldContent = contentMatch[1];
-        const looseRules = `default-src * 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https:; connect-src * vscode-file: file: data: blob: http: https:; frame-src * vscode-file: file: data: blob: http: https:; script-src * 'unsafe-inline' 'unsafe-eval' vscode-file: file: data: blob: http: https:; `;
-        const newContent = `${looseRules}${oldContent}`;
-        newTagContent = newTagContent.replace(contentRegex, `content="${newContent}"`);
-    }
+    const contentMatch = originalTag.match(contentRegex);
+    if (!contentMatch) { return; }
 
-    const injectionBlock = `
-${disabledTag}
-${CSP_MARKER_START}
-${CSP_ABS_CONTENT}
-${CSP_MARKER_END}
-`;
-    console.log("应用 CSP 补丁...");
-    html = html.replace(originalTag, injectionBlock);
+    const serverOrigin = `http://127.0.0.1:${port}`;
+    let restrictedContent = addSourceToDirective(contentMatch[1], 'frame-src', serverOrigin);
+    restrictedContent = addSourceToDirective(restrictedContent, 'connect-src', serverOrigin);
+    const patchedTag = originalTag.replace(contentRegex, `content="${restrictedContent}"`);
+
+    console.log(`[Wallpaper] Allowing local server in Workbench CSP: ${serverOrigin}`);
+    html = html.replace(originalTag, patchedTag);
     await saveFilePrivileged(targetHtml, html);
 }
-async function injectJs(mediaPath: string, type: WallpaperType, opacity: number, port: number, customJs: string, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
+async function injectJs(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
     const jsPath = getWorkbenchPath('js');
     if (!jsPath) { return; }
     
@@ -231,7 +192,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
 
             // 1. 创建 Loading 元素
             const loader = document.createElement('div');
-            loader.innerHTML = '<div style="width: 30px; height: 30px; border: 3px solid rgba(255,255,255,0.3); border-top: 3px solid #fff; border-radius: 50%; animation: vscode-wallpaper-spin 1s linear infinite;"></div>';
+            loader.textContent = 'Loading wallpaper...';
             loader.style.position = 'absolute';
             loader.style.top = '50%';
             loader.style.left = '50%';
@@ -252,112 +213,16 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
             el = document.createElement('iframe');
             el.className = 'vscode-wallpaper-iframe';
             el.frameBorder = '0';
-            el.allow = "autoplay; fullscreen; microphone; display-capture";
+            el.allow = "autoplay";
+            el.setAttribute('sandbox', '${getWallpaperIframeSandbox()}');
             el.style.opacity = '0'; // 初始隐藏
             el.style.transition = 'opacity 0.5s ease-in-out';
             
-            const srcdocContent = \`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <base href='http://127.0.0.1:${port}/' />
-                <style>body, html { margin: 0; padding: 0; overflow: hidden; background: black; }</style>
-            </head>
-            <body>
-                <script>
-                    const entryUrl = '${entryUrl}';
-                    async function loadWallpaper() {
-                        let attempts = 0;
-                        while(attempts < 200) {
-                            try {
-                                const resp = await fetch(entryUrl);
-                                if(!resp.ok) throw new Error('Server not ready');
-                                let html = await resp.text();
-                                
-                                // [Fix] Inject <base> tag to ensure relative paths work
-                                if (!html.includes('<base')) {
-                                    const baseTag = "<base href='http://127.0.0.1:${port}/' />";
-                                    if (html.includes('<head>')) {
-                                        html = html.replace('<head>', '<head>' + baseTag);
-                                    } else if (html.includes('<html>')) {
-                                        html = html.replace('<html>', '<html><head>' + baseTag + '</head>');
-                                    } else {
-                                        html = '<head>' + baseTag + '</head>' + html;
-                                    }
-                                }
-
-                                // [Fix] Static HTML file:// replacement
-                                html = html.replace(/(src|href)\\\\s*=\\\\s*(["'])file:\\\\/\\\\/\\\\//gi, '$1=$2/');
-                                html = html.replace(/url\\\\(\\\\s*(["']?)file:\\\\/\\\\/\\\\//gi, 'url($1/');
-                                
-                                const interceptor =  
-                                    "<script>" +
-                                    "(function(){" +
-                                    "    function r(u){" +
-                                    "        if(!u||typeof u!=='string')return u;" +
-                                    "        if(u.startsWith('file:///'))return u.replace('file:///','/');" +
-                                    "        return u;" +
-                                    "    }" +
-                                    "    const f=window.fetch;" +
-                                    "    window.fetch=function(i,n){" +
-                                    "        if(typeof i==='string')i=r(i);" +
-                                    "        return f(i,n);" +
-                                    "    };" +
-                                    "    const o=XMLHttpRequest.prototype.open;" +
-                                    "    XMLHttpRequest.prototype.open=function(m,u,...a){" +
-                                    "        u=r(u);" +
-                                    "        return o.call(this,m,u,...a);" +
-                                    "    };" +
-                                    "    function s(p){" +
-                                    "        const d=Object.getOwnPropertyDescriptor(p,'src');" +
-                                    "        if(d&&d.set){" +
-                                    "            const os=d.set;" +
-                                    "            Object.defineProperty(p,'src',{" +
-                                    "                set:function(v){" +
-                                    "                    if(this.tagName==='IMG'||this.tagName==='VIDEO'||this.tagName==='AUDIO'){" +
-                                    "                        this.crossOrigin='anonymous';" +
-                                    "                    }" +
-                                    "                    os.call(this,r(v));" +
-                                    "                }," +
-                                    "                get:d.get," +
-                                    "                enumerable:d.enumerable," +
-                                    "                configurable:d.configurable" +
-                                    "            });" +
-                                    "        }" +
-                                    "    }" +
-                                    "    if(window.HTMLImageElement)s(window.HTMLImageElement.prototype);" +
-                                    "    if(window.HTMLAudioElement)s(window.HTMLAudioElement.prototype);" +
-                                    "    if(window.HTMLVideoElement)s(window.HTMLVideoElement.prototype);" +
-                                    "    if(window.HTMLScriptElement)s(window.HTMLScriptElement.prototype);" +
-                                    "})();" +
-                                    "<\\\\/script>";
-
-                                if (html.includes('<head>')) {
-                                    html = html.replace('<head>', '<head>' + interceptor);
-                                } else {
-                                    html = interceptor + html;
-                                }
-                                document.open();
-                                document.write(html);
-                                document.close();
-                                return;
-                            } catch(err) {
-                                console.warn('Wallpaper Load Retry:', err);
-                                attempts++;
-                                await new Promise(r => setTimeout(r, 500));
-                            }
-                        }
-                        document.body.innerHTML = '<h1 style=color:red>Connection Failed</h1>';
-                    }
-                    loadWallpaper();
-                </script>
-            </body>
-            </html>
-            \`;
+            el.src = entryUrl;
             
             // Expose control functions to global scope
             window.reloadWallpaper = () => {
-                el.srcdoc = srcdocContent;
+                el.src = entryUrl;
             };
             
             window.showWallpaper = () => {
@@ -484,11 +349,14 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
         mainLoop();
 
         // Sidebar
-        if (true) {
+            if (${showDebugSidebar}) {
             // container.style.pointerEvents = 'auto';
             
-            // Use insertAdjacentHTML to handle multiple root elements correctly
-            container.insertAdjacentHTML('beforeend', \`${SIDEBAR_HTML}\`);
+             // Parse the fixed debugger template without using Trusted Types HTML sinks.
+             const sidebarDocument = new DOMParser().parseFromString(\`${SIDEBAR_HTML}\`, 'text/html');
+             Array.from(sidebarDocument.body.childNodes).forEach((node) => {
+                 container.appendChild(document.importNode(node, true));
+             });
             
             const style = document.createElement('style');
             style.textContent = \`${SIDEBAR_CSS}\`;
@@ -521,7 +389,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
                         })
                         .catch(e => {
                             console.error("[Sidebar] Error:", e);
-                            if (panel) panel.innerHTML = '<span style="color:orange">Failed to load project.json: ' + e.message + '</span>';
+                            if (panel) panel.textContent = 'Failed to load project.json: ' + e.message;
                         });
 
                     // Toggle Logic
@@ -567,7 +435,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
                 } catch (err) {
                     console.error("[Sidebar] Critical Error:", err);
                     const panel = document.getElementById('propsPanel');
-                    if (panel) panel.innerHTML = '<span style="color:red">JS Error: ' + err.message + '</span>';
+                    if (panel) panel.textContent = 'JS Error: ' + err.message;
                 }
             };
         }
@@ -601,14 +469,10 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
              window.addEventListener('resize', () => {
                  clearTimeout(resizeTimeout);
                  resizeTimeout = setTimeout(() => {
-                     el.srcdoc = srcdocContent;
+                      el.src = entryUrl;
                  }, ${resizeDelay});
              });
         }
-
-        try {
-            ${customJs}
-        } catch (e) { console.error("Custom JS Error:", e); }
 
     } catch (e) { console.error("Wallpaper Engine Error:", e); }
 })();
@@ -623,10 +487,10 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
     }
 }
 
-export async function performInjection(mediaPath: string, type: WallpaperType, opacity: number, port: number, customJs: string, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
+export async function performInjection(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
     try {
-        await patchWorkbenchHtml();
-        await injectJs(mediaPath, type, opacity, port, customJs, resizeDelay, startupCheckInterval, showDebugSidebar);
+        await patchWorkbenchHtml(port);
+        await injectJs(mediaPath, type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar);
         
         if (autoRestart) {
             // 直接重启，无需用户确认
@@ -692,8 +556,8 @@ const SIDEBAR_JS_LOGIC = `
     }
 
     function renderUI(json) {
-        const panel = document.getElementById('propsPanel');
-        panel.innerHTML = '';
+         const panel = document.getElementById('propsPanel');
+         while (panel.firstChild) panel.removeChild(panel.firstChild);
         const props = json.properties || (json.general && json.general.properties) || {};
         
         Object.keys(props).forEach(key => {

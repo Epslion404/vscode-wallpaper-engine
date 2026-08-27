@@ -5,6 +5,7 @@ node_modules
 *.vsix
 temp/
 .github/prompts/
+.planning/
 
 # compiled vsix
 artifacts/

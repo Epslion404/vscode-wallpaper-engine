@@ -74,12 +74,6 @@
           "default": 300,
           "description": "启动时检查壁纸服务器状态的间隔时间 (毫秒)"
         },
-        "vscode-wallpaper-engine.customJs": {
-          "type": "string",
-          "default": "",
-          "description": "自定义注入的 JavaScript 代码 (将在壁纸加载后执行)",
-          "editPresentation": "multilineText"
-        },
         "vscode-wallpaper-engine.customCss": {
           "type": "string",
           "default": "",
@@ -129,9 +123,8 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test",
-
     "output": "npm run vsce-package && node ./scripts/move-vsix.js",
-    "vsce-package": "npx vsce package"
+    "vsce-package": "npx @vscode/vsce package"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -140,12 +133,12 @@
     "@types/ws": "^8.18.1",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.27.0",
     "eslint": "^9.39.1",
     "npm-run-all": "^4.1.5",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.3",
-    "vsce": "^2.15.0"
+    "typescript-eslint": "^8.46.3"
   },
   "files": [
     "dist",
@@ -156,6 +149,6 @@
   ],
   "dependencies": {
     "sudo-prompt": "^9.2.1",
-    "ws": "^8.18.3"
+    "ws": "^8.21.3"
   }
 }

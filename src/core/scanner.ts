@@ -39,21 +39,47 @@ export class WallpaperItem implements vscode.QuickPickItem {
 }
 
 function resolveWallpaperInfo(workshopPath: string, id: string, visited = new Set<string>()): { type: WallpaperType, file: string, location: string } | null {
-    if (visited.has(id)) return null;
+    if (typeof id !== 'string' || !id) {
+        console.warn('[Scanner] Ignoring wallpaper entry with invalid id');
+        return null;
+    }
+
+    const workshopRoot = path.resolve(workshopPath);
+    const dirPath = path.resolve(workshopRoot, id);
+    const lexicalRelativePath = path.relative(workshopRoot, dirPath);
+    if (!lexicalRelativePath || lexicalRelativePath.startsWith(`..${path.sep}`) || path.isAbsolute(lexicalRelativePath)) {
+        console.warn(`[Scanner] Ignoring wallpaper path outside workshop root: ${id}`);
+        return null;
+    }
+
+    let realWorkshopRoot: string;
+    let realDirPath: string;
+    try {
+        realWorkshopRoot = fs.realpathSync.native(workshopRoot);
+        realDirPath = fs.realpathSync.native(dirPath);
+    } catch (error) {
+        return null;
+    }
+    const realRelativePath = path.relative(realWorkshopRoot, realDirPath);
+    if (!realRelativePath || realRelativePath.startsWith(`..${path.sep}`) || path.isAbsolute(realRelativePath)) {
+        console.warn(`[Scanner] Ignoring wallpaper symlink outside workshop root: ${id}`);
+        return null;
+    }
+
+    if (visited.has(id)) { return null; }
     visited.add(id);
 
-    const dirPath = path.join(workshopPath, id);
     const projectJsonPath = path.join(dirPath, 'project.json');
-    if (!fs.existsSync(projectJsonPath)) return null;
+    if (!fs.existsSync(projectJsonPath)) { return null; }
 
     try {
         const json = JSON.parse(fs.readFileSync(projectJsonPath, 'utf-8'));
         const rawType = json.type ? json.type.toLowerCase() : '';
         let type: WallpaperType | null = null;
 
-        if (rawType === 'video') type = WallpaperType.Video;
-        else if (rawType === 'image') type = WallpaperType.Image;
-        else if (rawType === 'web' || rawType === 'scene') type = WallpaperType.Web;
+        if (rawType === 'video') { type = WallpaperType.Video; }
+        else if (rawType === 'image') { type = WallpaperType.Image; }
+        else if (rawType === 'web') { type = WallpaperType.Web; }
 
         let file = json.file || null;
 

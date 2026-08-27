@@ -1,6 +1,21 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+    applyManagedColors,
+    ColorCustomizations,
+    ManagedColorBackups,
+    restoreManagedColors
+} from './transparency-state';
+
+const TRANSPARENCY_BACKUP_KEY = 'transparencyColorBackups';
+let globalState: vscode.Memento | undefined;
+let workspaceState: vscode.Memento | undefined;
+
+export function initializeTransparencyState(context: vscode.ExtensionContext): void {
+    globalState = context.globalState;
+    workspaceState = context.workspaceState;
+}
 
 // 【透明化目标列表】所有可能遮挡壁纸的 UI 元素 Key
 export const TRANSPARENT_COLOR_KEYS = [
@@ -69,14 +84,11 @@ export async function applyTransparencyPatch(target: vscode.ConfigurationTarget 
     const rules = config.get<{[key: string]: number}>('vscode-wallpaper-engine.transparencyRules') || {};
 
     // 1. 获取现有颜色自定义设置
-    const existingCustomizations = config.get<any>('workbench.colorCustomizations') || {};
-
-    // 2. 准备新的配置对象 (复制一份)
-    const newCustomizations = { ...existingCustomizations };
+    const existingCustomizations = getTargetCustomizations(config, target);
 
     // logging 
     console.log("[CUSTOM COLOR] Existing Customizations:", existingCustomizations);
-    console.log("[CUSTOM COLOR] New Customizations:", newCustomizations);
+    console.log("[CUSTOM COLOR] Managed target:", target);
 
     // 获取当前主题类型 (Light/Dark)
     const isLightTheme = vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Light;
@@ -91,7 +103,7 @@ export async function applyTransparencyPatch(target: vscode.ConfigurationTarget 
     // 尝试加载当前激活主题的原始 colors（从主题扩展的 JSON 文件）
     const themeColors = await loadActiveThemeColors();
 
-    // 3. 应用规则
+    const desiredCustomizations: ColorCustomizations = {};
     for (const key of TRANSPARENT_COLOR_KEYS) {
         if (rules[key] !== undefined) {
             // 启用：设置颜色
@@ -142,21 +154,24 @@ export async function applyTransparencyPatch(target: vscode.ConfigurationTarget 
                 }
             }
 
-            newCustomizations[key] = `${baseColor}${alpha}`;
-        } else {
-            // 禁用：移除配置，恢复默认
-            delete newCustomizations[key];
+            desiredCustomizations[key] = `${baseColor}${alpha}`;
         }
     }
 
+    const state = getState(target);
+    const backups = state?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    const result = applyManagedColors(existingCustomizations, desiredCustomizations, backups);
+
     // 4. 检查是否有变更 (避免重复更新导致闪烁或死循环)
-    if (JSON.stringify(existingCustomizations) === JSON.stringify(newCustomizations)) {
+    if (JSON.stringify(existingCustomizations) === JSON.stringify(result.customizations)) {
+        await state?.update(TRANSPARENCY_BACKUP_KEY, result.backups);
         return;
     }
 
     // 5. 更新设置
     try {
-        await config.update('workbench.colorCustomizations', newCustomizations, target);
+        await config.update('workbench.colorCustomizations', result.customizations, target);
+        await state?.update(TRANSPARENCY_BACKUP_KEY, result.backups);
         vscode.window.setStatusBarMessage('✅ UI Transparency Updated', 2000);
     } catch (error) {
         vscode.window.showErrorMessage('❌ 无法自动修改 settings.json。');
@@ -169,26 +184,32 @@ export async function applyTransparencyPatch(target: vscode.ConfigurationTarget 
  */
 export async function removeTransparencyPatch(target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global) {
     const config = vscode.workspace.getConfiguration();
-    const existingCustomizations: any = config.get('workbench.colorCustomizations') || {};
-    
-    const cleanedCustomizations = { ...existingCustomizations };
+    const existingCustomizations = getTargetCustomizations(config, target);
+    const state = getState(target);
+    const backups = state?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    const restoredCustomizations = restoreManagedColors(existingCustomizations, backups);
+    const finalSettings = Object.keys(restoredCustomizations).length === 0 ? undefined : restoredCustomizations;
 
-    // 1. 移除我们添加的所有透明度键
-    let keysRemoved = false;
-    for (const key of TRANSPARENT_COLOR_KEYS) {
-        if (cleanedCustomizations[key] !== undefined) {
-             delete cleanedCustomizations[key];
-             keysRemoved = true;
-        }
+    if (Object.keys(backups).length > 0) {
+        await config.update('workbench.colorCustomizations', finalSettings, target);
+        await state?.update(TRANSPARENCY_BACKUP_KEY, undefined);
+        vscode.window.setStatusBarMessage('UI Transparency Removed', 2000);
     }
+}
 
-    // 2. 如果清理后对象为空，直接清空整个 colorCustomizations 键。
-    const finalSettings = Object.keys(cleanedCustomizations).length === 0 ? undefined : cleanedCustomizations;
+function getState(target: vscode.ConfigurationTarget): vscode.Memento | undefined {
+    return target === vscode.ConfigurationTarget.Workspace ? workspaceState : globalState;
+}
 
-    if (keysRemoved) {
-         await config.update('workbench.colorCustomizations', finalSettings, target);
-         vscode.window.setStatusBarMessage('✅ UI Transparency Removed', 2000);
+function getTargetCustomizations(
+    config: vscode.WorkspaceConfiguration,
+    target: vscode.ConfigurationTarget
+): ColorCustomizations {
+    const inspected = config.inspect<ColorCustomizations>('workbench.colorCustomizations');
+    if (target === vscode.ConfigurationTarget.Workspace) {
+        return inspected?.workspaceValue || {};
     }
+    return inspected?.globalValue || {};
 }
 
     // ---- Helper: 解析并返回激活主题的 colors 对象（如果能找到） ----

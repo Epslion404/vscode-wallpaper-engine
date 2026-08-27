@@ -1,11 +1,13 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as dns from 'dns';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { WebSocket, WebSocketServer } from 'ws';
 import { WALLPAPER_SERVER_PORT } from '../config/constants';
 import { MOCK_API_SCRIPT, BOOTSTRAP_SCRIPT } from './web-api-mock';
+import { assertPublicAddress, isPathWithinRealRoot, validateProxyTarget } from './server-security';
 
 export class WallpaperServer {
     private server: http.Server | null = null;
@@ -16,7 +18,6 @@ export class WallpaperServer {
     private PORT = WALLPAPER_SERVER_PORT; 
 
     private searchPaths: string[] = [];
-    private workshopBasePath: string | null = null;
     private reloadFlag = false; // [New] Flag to trigger client reload
 
     private shutdownTimeout: NodeJS.Timeout | null = null;
@@ -111,11 +112,10 @@ export class WallpaperServer {
     // [修改] 变成 async，确保状态保存完毕
     public async start(rootPath: string, port: number, entryFile?: string, location?: string, silent = false) {
         console.log(`[server launch] start called. root: ${rootPath}, port: ${port}, entry: ${entryFile}, loc: ${location}`);
-        this.PORT = port;
         vscode.window.setStatusBarMessage(`Preparing Wallpaper Server...`, 5000);
         
         // 1. Check local instance
-        if (this.server) {
+        if (this.server && this.PORT === port) {
             if (this.currentRoot === rootPath && this.entryFile === (entryFile || null)) {
                 return;
             } else {
@@ -131,6 +131,12 @@ export class WallpaperServer {
                 return;
             }
         }
+
+        if (this.server) {
+            console.log(`[Server] Port changed from ${this.PORT} to ${port}; rebinding server.`);
+            await this.stop();
+        }
+        this.PORT = port;
 
         // 2. Check external instance (Multi-window support)
         const status = await this.checkServerStatus(port);
@@ -174,7 +180,7 @@ export class WallpaperServer {
         }
 
         // 关闭旧服务
-        this.stop();
+        await this.stop();
 
         this.currentRoot = rootPath;
         this.entryFile = entryFile || null;
@@ -196,9 +202,25 @@ export class WallpaperServer {
 
             const safeRoot = path.normalize(this.currentRoot);
             // 简单的 URL 处理
-            let reqUrl = req.url ? decodeURIComponent(req.url.split('?')[0]) : '/';
+            let reqUrl: string;
+            try {
+                reqUrl = req.url ? decodeURIComponent(req.url.split('?')[0]) : '/';
+            } catch {
+                res.statusCode = 400;
+                res.end('Invalid URL encoding');
+                return;
+            }
             
             console.log(`[Server] Request: ${req.method} ${req.url} -> ${reqUrl}`);
+
+            if (req.method === 'OPTIONS') {
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+                res.setHeader('Access-Control-Allow-Headers', '*');
+                res.statusCode = 204;
+                res.end();
+                return;
+            }
 
             // 默认访问 index.html
             if (reqUrl === '/' || reqUrl === '') {
@@ -283,7 +305,7 @@ export class WallpaperServer {
                 return;
             }
 
-            // [New] API to get entry HTML (for srcdoc injection)
+            // 返回由沙箱 iframe 直接加载的壁纸入口 HTML。
             if (reqUrl === '/api/get-entry') {
                 console.log(`[Server] /api/get-entry called. entryFile: ${this.entryFile}, root: ${this.currentRoot}`);
                 let entryPath = '';
@@ -329,19 +351,16 @@ export class WallpaperServer {
                         // Try to find the file in search paths
                         for (const basePath of this.searchPaths) {
                             const tryPath = path.join(basePath, this.entryFile);
-                            if (fs.existsSync(tryPath)) {
+                            if (isPathWithinRealRoot(basePath, tryPath) && fs.statSync(tryPath).isFile()) {
                                 entryPath = tryPath;
                                 break;
                             }
-                        }
-                        if (!entryPath) {
-                            entryPath = path.join(this.currentRoot, this.entryFile);
                         }
                     } else {
                         // If not HTML (e.g. scene.pkg, project.json), try to find index.html in search paths
                         for (const basePath of this.searchPaths) {
                             const tryIndex = path.join(basePath, 'index.html');
-                            if (fs.existsSync(tryIndex)) {
+                            if (isPathWithinRealRoot(basePath, tryIndex) && fs.statSync(tryIndex).isFile()) {
                                 entryPath = tryIndex;
                                 break;
                             }
@@ -349,14 +368,17 @@ export class WallpaperServer {
                         
                         if (!entryPath) {
                             // Fallback to the file itself (might be text/json)
-                            entryPath = path.join(this.currentRoot, this.entryFile);
+                            const fallbackPath = path.join(this.currentRoot, this.entryFile);
+                            if (isPathWithinRealRoot(this.currentRoot, fallbackPath) && fs.statSync(fallbackPath).isFile()) {
+                                entryPath = fallbackPath;
+                            }
                         }
                     }
                 } else {
                     // Fallback: Search for index.html
                     for (const basePath of this.searchPaths) {
                         const tryPath = path.join(basePath, 'index.html');
-                        if (fs.existsSync(tryPath)) {
+                        if (isPathWithinRealRoot(basePath, tryPath) && fs.statSync(tryPath).isFile()) {
                             entryPath = tryPath;
                             break;
                         }
@@ -390,9 +412,9 @@ export class WallpaperServer {
                     // 4. ([\s\S]*?<\/video>) : Match remaining content and closing video tag
                     html = html.replace(/(<video[^>]*)(>[\s\S]*?)<source[^>]*\s+src=['"]([^'"]+)['"][^>]*>([\s\S]*?<\/video>)/gi, '$1 src="$3"$2$4');
 
-                    // Inject base tag and scripts
+                    const baseTag = /<base\b/i.test(html) ? '' : `<base href="http://127.0.0.1:${this.PORT}/" />`;
                     const injection = `
-<base href="http://127.0.0.1:${this.PORT}/" />
+${baseTag}
 <style>
     /* Hide common debug elements (stats.js, dat.gui, etc) */
     #stats, .stats, #fps, .fps, #debug, .debug, .dg.ac { display: none !important; }
@@ -426,7 +448,7 @@ export class WallpaperServer {
                     let allFiles = new Set<string>();
                     for (const basePath of this.searchPaths) {
                         const fullPath = path.join(basePath, targetPath);
-                        if (fullPath.startsWith(basePath) && fs.existsSync(fullPath)) {
+                        if (isPathWithinRealRoot(basePath, fullPath) && fs.existsSync(fullPath)) {
                             try {
                                 if (fs.statSync(fullPath).isDirectory()) {
                                     const files = fs.readdirSync(fullPath);
@@ -494,7 +516,7 @@ export class WallpaperServer {
                     let allFiles: string[] = [];
                     for (const basePath of this.searchPaths) {
                         const fullPath = path.join(basePath, targetPath);
-                        if (fullPath.startsWith(basePath) && fs.existsSync(fullPath)) {
+                        if (isPathWithinRealRoot(basePath, fullPath) && fs.existsSync(fullPath)) {
                             try {
                                 if (fs.statSync(fullPath).isDirectory()) {
                                     const files = fs.readdirSync(fullPath);
@@ -519,37 +541,99 @@ export class WallpaperServer {
 
             // [New] API: Proxy
             if (reqUrl === '/proxy') {
-                const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-                const targetUrl = urlObj.searchParams.get("url");
-                if (!targetUrl) {
+                let targetUrl: string | null;
+                try {
+                    const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+                    targetUrl = urlObj.searchParams.get('url');
+                } catch {
                     res.statusCode = 400;
-                    res.end("Missing url param");
+                    res.end('Invalid proxy URL');
                     return;
                 }
-
-                console.log(`[Proxy] ${targetUrl}`);
-                const lib = targetUrl.startsWith("https") ? https : http;
-                const proxyReq = lib.get(targetUrl, (proxyRes) => {
-                    // Copy headers but ensure CORS
-                    const headers = { ...proxyRes.headers };
-                    // Remove existing CORS headers to avoid conflicts
-                    delete headers['access-control-allow-origin'];
-                    delete headers['access-control-allow-methods'];
-                    delete headers['access-control-allow-headers'];
-                    
-                    headers["access-control-allow-origin"] = "*";
-                    headers["access-control-allow-methods"] = "GET, POST, OPTIONS";
-                    headers["access-control-allow-headers"] = "*";
-                    headers["access-control-allow-credentials"] = "true";
-                    
-                    res.writeHead(proxyRes.statusCode || 200, headers);
-                    proxyRes.pipe(res);
-                });
-                
-                proxyReq.on("error", (e) => {
-                    console.error(`[Proxy Error] ${e.message}`);
-                    res.statusCode = 500;
-                    res.end(e.message);
+                if (!targetUrl) {
+                    res.statusCode = 400;
+                    res.end('Missing url param');
+                    return;
+                }
+                let target: URL;
+                try {
+                    target = validateProxyTarget(targetUrl);
+                } catch {
+                    res.statusCode = 400;
+                    res.end('Proxy target is not allowed');
+                    return;
+                }
+                dns.lookup(target.hostname, { all: true }, (lookupError, addresses) => {
+                    if (lookupError || addresses.length === 0) {
+                        res.statusCode = 502;
+                        res.end('Proxy DNS lookup failed');
+                        return;
+                    }
+                    try {
+                        addresses.forEach(({ address }) => assertPublicAddress(address));
+                    } catch {
+                        res.statusCode = 400;
+                        res.end('Proxy target is not allowed');
+                        return;
+                    }
+                    const address = addresses[0];
+                    const client = target.protocol === 'https:' ? https : http;
+                    const proxyReq = client.get({
+                        protocol: target.protocol,
+                        hostname: address.address,
+                        port: target.port || undefined,
+                        path: `${target.pathname}${target.search}`,
+                        headers: { Host: target.host },
+                        servername: target.hostname
+                    }, proxyRes => {
+                        if ((proxyRes.statusCode || 0) >= 300 && (proxyRes.statusCode || 0) < 400) {
+                            proxyRes.resume();
+                            res.statusCode = 502;
+                            res.end('Proxy redirects are not allowed');
+                            return;
+                        }
+                        const maxBytes = 10 * 1024 * 1024;
+                        const contentLength = Number(proxyRes.headers['content-length'] || 0);
+                        if (contentLength > maxBytes) {
+                            proxyRes.resume();
+                            res.statusCode = 502;
+                            res.end('Proxy response too large');
+                            return;
+                        }
+                        const headers = { ...proxyRes.headers, 'access-control-allow-origin': '*' };
+                        delete headers['access-control-allow-methods'];
+                        delete headers['access-control-allow-headers'];
+                        delete headers['access-control-allow-credentials'];
+                        const chunks: Buffer[] = [];
+                        let total = 0;
+                        let exceededLimit = false;
+                        proxyRes.on('data', chunk => {
+                            total += Buffer.byteLength(chunk);
+                            if (total > maxBytes) {
+                                exceededLimit = true;
+                                proxyRes.resume();
+                                return;
+                            }
+                            chunks.push(Buffer.from(chunk));
+                        });
+                        proxyRes.on('end', () => {
+                            if (exceededLimit) {
+                                res.statusCode = 502;
+                                res.end('Proxy response too large');
+                                return;
+                            }
+                            res.writeHead(proxyRes.statusCode || 200, headers);
+                            res.end(Buffer.concat(chunks));
+                        });
+                    });
+                    proxyReq.setTimeout(10000, () => proxyReq.destroy(new Error('Proxy timeout')));
+                    proxyReq.on('error', error => {
+                        console.error(`[Proxy Error] ${error.message}`);
+                        if (!res.headersSent) {
+                            res.statusCode = 502;
+                            res.end('Proxy request failed');
+                        }
+                    });
                 });
                 return;
             }
@@ -606,24 +690,11 @@ export class WallpaperServer {
             
             for (const basePath of this.searchPaths) {
                 const tryPath = path.join(basePath, reqUrl);
-                if (tryPath.startsWith(basePath) && fs.existsSync(tryPath) && fs.statSync(tryPath).isFile()) {
+                if (isPathWithinRealRoot(basePath, tryPath) && fs.existsSync(tryPath) && fs.statSync(tryPath).isFile()) {
                     filePath = tryPath;
                     fileFound = true;
                     console.log(`[add file] Serving: ${filePath}`);
                     break;
-                }
-            }
-
-            // [New] Fallback: Try to find file in the workshop base path (sibling directories)
-            if (!fileFound && this.workshopBasePath) {
-                // Remove leading slash for safe joining
-                const safeUrl = reqUrl.replace(/^[\\/]+/, "");
-                const tryPath = path.join(this.workshopBasePath, safeUrl);
-                // Ensure the path is still within workshopBasePath (basic security)
-                if (tryPath.startsWith(this.workshopBasePath) && fs.existsSync(tryPath) && fs.statSync(tryPath).isFile()) {
-                    filePath = tryPath;
-                    fileFound = true;
-                    console.log(`[add file] Serving from workshop base: ${filePath}`);
                 }
             }
 
@@ -683,15 +754,6 @@ export class WallpaperServer {
                 res.end('Not Found');
             }
 
-            // Handle CORS preflight requests
-            if (req.method === 'OPTIONS') {
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-                res.setHeader('Access-Control-Allow-Headers', '*');
-                res.writeHead(200);
-                res.end();
-                return;
-            }
         });
 
         // Initialize WebSocket Server
@@ -758,10 +820,8 @@ export class WallpaperServer {
             this.searchPaths.push(location);
         }
         
-        // Always set workshop base path to parent directory, consistent with demo
         const basePath = path.dirname(rootPath);
-        this.workshopBasePath = basePath;
-        console.log(`[add file] Inferred base path: ${basePath}`);
+        console.log(`[add file] Inferred dependency base path: ${basePath}`);
 
         // Try to find dependencies if it looks like a workshop ID
         const match = rootPath.match(/[\\/](\d+)$/);
@@ -849,7 +909,7 @@ export class WallpaperServer {
         }, 5000); // 每 5 秒检查一次
     }
 
-    public stop() {
+    public async stop(): Promise<void> {
         if (this.shutdownTimeout) {
             clearTimeout(this.shutdownTimeout);
             this.shutdownTimeout = null;
@@ -863,11 +923,14 @@ export class WallpaperServer {
             this.retryInterval = null;
         }
         if (this.server) {
-            if (typeof this.server.closeAllConnections === 'function') {
-                this.server.closeAllConnections();
-            }
-            this.server.close();
+            const activeServer = this.server;
             this.server = null;
+            if (typeof activeServer.closeAllConnections === 'function') {
+                activeServer.closeAllConnections();
+            }
+            await new Promise<void>(resolve => {
+                activeServer.close(() => resolve());
+            });
         }
         console.log('[Server] Server stopped.');
     }

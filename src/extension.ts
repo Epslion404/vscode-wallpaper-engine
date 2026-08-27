@@ -7,10 +7,10 @@ import { getConfiguration, validateConfig } from './config';
 import { scanWallpapers, getWallpaperById } from './core/scanner';
 import { performInjection, restoreWorkbench, isPatched } from './core/injector';
 import { WallpaperServer } from './core/server';
-import { WallpaperType } from './core/types';
 import { WALLPAPER_SERVER_PORT } from './config/constants';
-import { applyTransparencyPatch, removeTransparencyPatch } from './core/config-patcher';
+import { applyTransparencyPatch, initializeTransparencyState, removeTransparencyPatch } from './core/config-patcher';
 import { SettingsPanel } from './panels/setting-panel';
+import { classifyConfigurationChange } from './configuration-change';
 
 // test
 import { openTestPage } from './playground/page';
@@ -29,6 +29,7 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log('Congratulations, your extension "vscode-wallpaper-engine" is now active!');
     
     server = new WallpaperServer(context);
+    initializeTransparencyState(context);
     const initialConfig = getConfiguration();
     const savedPath = context.globalState.get<string>('currentWallpaperPath');
     const savedEntry = context.globalState.get<string>('currentWallpaperEntry');
@@ -58,7 +59,7 @@ export function activate(context: vscode.ExtensionContext) {
                 });
             }
 
-            await performInjection(filePath, WallpaperType.Web, config.opacity, config.serverPort, config.customJs, config.resizeDelay, config.startupCheckInterval, false, SHOW_DEBUG_SIDEBAR);
+            await performInjection(filePath, type, config.opacity, config.serverPort, config.resizeDelay, config.startupCheckInterval, false, SHOW_DEBUG_SIDEBAR);
             
             // Apply transparency patch
             await applyTransparencyPatch();
@@ -80,18 +81,14 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async e => {
         if (isSettingWallpaper) { return; }
         
-        const affectsId = e.affectsConfiguration('vscode-wallpaper-engine.wallpaperId');
-        const affectsOthers = 
-            e.affectsConfiguration('vscode-wallpaper-engine.backgroundOpacity') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.serverPort') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.customJs') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.resizeDelay') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.startupCheckInterval') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.transparentOpacity') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.transparentCss') ||
-            e.affectsConfiguration('vscode-wallpaper-engine.customCss');
+        const changedKeys = [
+            'wallpaperId', 'workshopPath', 'backgroundOpacity', 'serverPort',
+            'resizeDelay', 'startupCheckInterval', 'customCss',
+            'transparencyEnabled', 'transparencyRules', 'transparencyBaseColor'
+        ].filter(key => e.affectsConfiguration(`vscode-wallpaper-engine.${key}`));
+        const { wallpaper, transparency } = classifyConfigurationChange(changedKeys);
 
-        if (affectsId && !affectsOthers) {
+        if (wallpaper && changedKeys.length === 1 && changedKeys[0] === 'wallpaperId') {
              const config = getConfiguration();
              if (config.wallpaperId && config.workshopPath) {
                 const item = getWallpaperById(config.workshopPath, config.wallpaperId);
@@ -102,8 +99,10 @@ export function activate(context: vscode.ExtensionContext) {
              }
         }
 
-        if (affectsId || affectsOthers) {
-            await applyWallpaper();
+        if (wallpaper) {
+            await applyWallpaper(changedKeys.includes('serverPort'));
+        } else if (transparency) {
+            await applyTransparencyPatch();
         }
     }));
 
@@ -174,8 +173,8 @@ export function activate(context: vscode.ExtensionContext) {
                         });
                     }
                     
-                    // Pass autoRestart=false because we handle reload via ping
-                    await performInjection(filePath, WallpaperType.Web, config.opacity, config.serverPort, config.customJs, config.resizeDelay, config.startupCheckInterval, false, SHOW_DEBUG_SIDEBAR);
+                    await applyTransparencyPatch();
+                    await performInjection(filePath, type, config.opacity, config.serverPort, config.resizeDelay, config.startupCheckInterval, true, SHOW_DEBUG_SIDEBAR);
                 } finally {
                     setTimeout(() => { isSettingWallpaper = false; }, 2000);
                 }
@@ -200,7 +199,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (confirm === '卸载') {
             await restoreWorkbench();
             await removeTransparencyPatch();
-            server?.stop();
+            await server?.stop();
         }
     });
     context.subscriptions.push(uninstallCmd);
@@ -251,6 +250,8 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {
-    server?.stop();
+export async function deactivate() {
+    await restoreWorkbench();
+    await removeTransparencyPatch();
+    await server?.stop();
 }

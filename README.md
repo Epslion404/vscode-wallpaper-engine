@@ -67,7 +67,6 @@
 ### 高级设置
 
 - `vscode-wallpaper-engine.customCss`: 注入自定义 CSS 代码，用于微调界面样式。
-- `vscode-wallpaper-engine.customJs`: 注入自定义 JS 代码。
 
 ## 🎮 使用指南
 

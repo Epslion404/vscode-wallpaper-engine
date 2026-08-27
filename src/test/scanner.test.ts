@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { scanWallpapers } from '../core/scanner';
+import { getWallpaperById, scanWallpapers } from '../core/scanner';
 import { WallpaperType } from '../core/types';
 
 suite('Scanner Test Suite', () => {
@@ -47,6 +47,93 @@ suite('Scanner Test Suite', () => {
 
         const items = scanWallpapers(tempDir);
         assert.strictEqual(items.length, 0);
+    });
+
+    test('scanWallpapers should ignore native scene wallpapers', () => {
+        const wpDir = path.join(tempDir, 'scene-wallpaper');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
+            title: 'Native Scene Wallpaper',
+            file: 'scene.pkg',
+            type: 'scene'
+        }));
+
+        const items = scanWallpapers(tempDir);
+
+        assert.strictEqual(items.length, 0);
+    });
+
+    test('getWallpaperById should reject paths outside the workshop root', () => {
+        const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-wallpaper-outside-test-'));
+        fs.writeFileSync(path.join(outsideDir, 'project.json'), JSON.stringify({
+            title: 'Outside Wallpaper',
+            file: 'index.html',
+            type: 'web'
+        }));
+
+        try {
+            const escapedId = path.relative(tempDir, outsideDir);
+            const item = getWallpaperById(tempDir, escapedId);
+
+            assert.strictEqual(item, null);
+        } finally {
+            fs.rmSync(outsideDir, { recursive: true, force: true });
+        }
+    });
+
+    test('scanWallpapers should reject dependencies outside the workshop root', () => {
+        const wpDir = path.join(tempDir, 'dependent-wallpaper');
+        const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-wallpaper-dependency-test-'));
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
+            title: 'Dependent Wallpaper',
+            dependency: path.relative(tempDir, outsideDir)
+        }));
+        fs.writeFileSync(path.join(outsideDir, 'project.json'), JSON.stringify({
+            title: 'Outside Dependency',
+            file: 'index.html',
+            type: 'web'
+        }));
+
+        try {
+            const items = scanWallpapers(tempDir);
+
+            assert.strictEqual(items.length, 0);
+        } finally {
+            fs.rmSync(outsideDir, { recursive: true, force: true });
+        }
+    });
+
+    test('scanWallpapers should ignore malformed dependency ids', () => {
+        const wpDir = path.join(tempDir, 'malformed-dependency');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
+            title: 'Malformed Dependency',
+            dependency: { id: 'not-a-string' }
+        }));
+
+        const items = scanWallpapers(tempDir);
+
+        assert.strictEqual(items.length, 0);
+    });
+
+    test('scanWallpapers should reject wallpaper symlinks outside the workshop root', () => {
+        const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-wallpaper-symlink-test-'));
+        const linkPath = path.join(tempDir, 'linked-wallpaper');
+        fs.writeFileSync(path.join(outsideDir, 'project.json'), JSON.stringify({
+            title: 'Linked Outside Wallpaper',
+            file: 'index.html',
+            type: 'web'
+        }));
+        fs.symlinkSync(outsideDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+
+        try {
+            const items = scanWallpapers(tempDir);
+
+            assert.strictEqual(items.length, 0);
+        } finally {
+            fs.rmSync(outsideDir, { recursive: true, force: true });
+        }
     });
     
     test('scanWallpapers should handle missing project.json', () => {
