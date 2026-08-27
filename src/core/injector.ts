@@ -19,6 +19,72 @@ const ATTR_RENAMED = 'http-equiv="Content-Security-Policy--replaced-by-wallpaper
 
 const LOCAL_SERVER_ORIGIN_PATTERN = /http:\/\/127\.0\.0\.1:\d+/g;
 
+export type InjectionStage = 'html' | 'javascript' | 'reload';
+
+/** 注入流程中的可分类错误；cause 保留底层 I/O 或命令异常。 */
+export class WorkbenchInjectionError extends Error {
+    constructor(
+        public readonly stage: InjectionStage,
+        message: string,
+        options?: { cause?: unknown },
+    ) {
+        super(message, options);
+        this.name = 'WorkbenchInjectionError';
+    }
+}
+
+export function ensureInjectionWritten(content: string, marker: string, targetPath: string): void {
+    if (!content.includes(marker)) {
+        throw new Error(`写入校验失败: ${targetPath}`);
+    }
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+export async function runInjectionStep(
+    stage: InjectionStage,
+    description: string,
+    operation: () => Promise<void>,
+): Promise<void> {
+    try {
+        await operation();
+    } catch (error) {
+        if (error instanceof WorkbenchInjectionError) {
+            throw error;
+        }
+        throw new WorkbenchInjectionError(
+            stage,
+            `${description}: ${errorMessage(error)}`,
+            { cause: error },
+        );
+    }
+}
+
+export interface InjectionOperations {
+    patchHtml: () => Promise<void>;
+    injectJavaScript: () => Promise<void>;
+    reloadWorkbench: () => Promise<void>;
+}
+
+/** 串行执行注入，确保任一步失败后不会继续进入重载。 */
+export async function executeInjection(
+    operations: InjectionOperations,
+    autoRestart: boolean,
+): Promise<void> {
+    await runInjectionStep('html', 'Workbench HTML 注入失败', operations.patchHtml);
+    await runInjectionStep(
+        'javascript',
+        'Workbench JavaScript 注入失败',
+        operations.injectJavaScript,
+    );
+
+    if (autoRestart) {
+        await runInjectionStep('reload', 'Workbench 重载失败', operations.reloadWorkbench);
+    }
+}
+
 function getWallpaperIframeSandbox(): string {
     return 'allow-scripts';
 }
@@ -132,7 +198,7 @@ export async function restoreWorkbench() {
  */
 async function patchWorkbenchHtml(port: number) {
     const targetHtml = getWorkbenchPath('html');
-    if (!targetHtml) { return; }
+    if (!targetHtml) { throw new Error('未找到 Workbench HTML 文件'); }
 
     let html = fs.readFileSync(targetHtml, 'utf-8');
 
@@ -142,12 +208,12 @@ async function patchWorkbenchHtml(port: number) {
 
     const metaTagRegex = /<meta[\s\S\n]*?http-equiv="Content-Security-Policy"[\s\S\n]*?>/i;
     const match = html.match(metaTagRegex);
-    if (!match) { return; }
+    if (!match) { throw new Error('Workbench HTML 缺少 Content-Security-Policy'); }
 
     const originalTag = match[0];
     const contentRegex = /content="([\s\S]*?)"/i;
     const contentMatch = originalTag.match(contentRegex);
-    if (!contentMatch) { return; }
+    if (!contentMatch) { throw new Error('无法读取 Workbench CSP 内容'); }
 
     const serverOrigin = `http://127.0.0.1:${port}`;
     let restrictedContent = addSourceToDirective(contentMatch[1], 'frame-src', serverOrigin);
@@ -157,10 +223,11 @@ async function patchWorkbenchHtml(port: number) {
     console.log(`[Wallpaper] Allowing local server in Workbench CSP: ${serverOrigin}`);
     html = html.replace(originalTag, patchedTag);
     await saveFilePrivileged(targetHtml, html);
+    ensureInjectionWritten(fs.readFileSync(targetHtml, 'utf-8'), patchedTag, targetHtml);
 }
 async function injectJs(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
     const jsPath = getWorkbenchPath('js');
-    if (!jsPath) { return; }
+    if (!jsPath) { throw new Error('未找到 Workbench JavaScript 文件'); }
     
     let elementCreationCode = '';
 
@@ -478,28 +545,27 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
 })();
 /* [VSCode-Wallpaper-Injection-End] */`;
 
-    try {
-        let raw = fs.readFileSync(jsPath, 'utf-8');
-        raw = raw.replace(JS_INJECTION_REGEX, '');
-        await saveFilePrivileged(jsPath, raw + jsInjection);
-    } catch (e) {
-        throw new Error(`JS 注入失败: ${e}`);
-    }
+    let raw = fs.readFileSync(jsPath, 'utf-8');
+    raw = raw.replace(JS_INJECTION_REGEX, '');
+    await saveFilePrivileged(jsPath, raw + jsInjection);
+    ensureInjectionWritten(
+        fs.readFileSync(jsPath, 'utf-8'),
+        '/* [VSCode-Wallpaper-Injection-Start] */',
+        jsPath,
+    );
 }
 
 export async function performInjection(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
-    try {
-        await patchWorkbenchHtml(port);
-        await injectJs(mediaPath, type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar);
-        
-        if (autoRestart) {
-            // 直接重启，无需用户确认
+    await executeInjection({
+        patchHtml: () => patchWorkbenchHtml(port),
+        injectJavaScript: () => (
+            injectJs(mediaPath, type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar)
+        ),
+        reloadWorkbench: async () => {
             vscode.window.setStatusBarMessage('Wallpaper installed. Restarting...', 5000);
             await vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-    } catch (error: any) {
-        vscode.window.showErrorMessage(error.message || String(error));
-    }
+        },
+    }, autoRestart);
 }
 
 function escapeRegExp(string: string) {

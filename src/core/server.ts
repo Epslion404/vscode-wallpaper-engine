@@ -8,12 +8,23 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { WALLPAPER_SERVER_PORT } from '../config/constants';
 import { MOCK_API_SCRIPT, BOOTSTRAP_SCRIPT } from './web-api-mock';
 import { assertPublicAddress, isPathWithinRealRoot, validateProxyTarget } from './server-security';
+import {
+    requestLocalEndpoint,
+    validateWallpaperMedia,
+    waitForServerListening,
+    WallpaperPreflightError,
+    WallpaperServerStartupTimeoutError
+} from './server-preflight';
+
+export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupTimeoutError } from './server-preflight';
+
+const SERVER_STARTUP_TIMEOUT_MS = 5000;
+const SERVER_PREFLIGHT_TIMEOUT_MS = 3000;
 
 export class WallpaperServer {
     private server: http.Server | null = null;
     private wss: WebSocketServer | null = null;
     private currentRoot: string = '';
-    private retryInterval: NodeJS.Timeout | null = null;
     // 端口必须与 injector.ts 里的保持一致
     private PORT = WALLPAPER_SERVER_PORT; 
 
@@ -71,7 +82,7 @@ export class WallpaperServer {
         this.reloadFlag = true;
     }
 
-    private checkServerStatus(port: number): Promise<{ running: boolean, rootPath: string } | null> {
+    private checkServerStatus(port: number): Promise<{ running: boolean, rootPath: string, entryFile?: string | null } | null> {
         return new Promise((resolve) => {
             const req = http.get(`http://127.0.0.1:${port}/status`, { agent: false }, (res) => {
                 if (res.statusCode !== 200) {
@@ -109,8 +120,7 @@ export class WallpaperServer {
         });
     }
 
-    // [修改] 变成 async，确保状态保存完毕
-    public async start(rootPath: string, port: number, entryFile?: string, location?: string, silent = false) {
+    public async start(rootPath: string, port: number, entryFile?: string, location?: string, silent = false): Promise<void> {
         console.log(`[server launch] start called. root: ${rootPath}, port: ${port}, entry: ${entryFile}, loc: ${location}`);
         vscode.window.setStatusBarMessage(`Preparing Wallpaper Server...`, 5000);
         
@@ -141,11 +151,15 @@ export class WallpaperServer {
         // 2. Check external instance (Multi-window support)
         const status = await this.checkServerStatus(port);
         if (status && status.running) {
-            if (status.rootPath === rootPath) {
+            if (status.rootPath === rootPath && status.entryFile === (entryFile || null)) {
                 console.log(`[Server] Reusing existing server for ${rootPath}`);
                 this.currentRoot = rootPath;
-                // Even if we reuse, we should ensure global state is synced
+                this.entryFile = entryFile || null;
+                this.currentLocation = location;
+                this.updateSearchPaths(rootPath, location);
                 await this.context.globalState.update('currentWallpaperPath', rootPath);
+                await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
+                await this.context.globalState.update('currentWallpaperLocation', location);
                 return;
             } else {
                 console.log(`[Server] Existing server running different path (${status.rootPath}). Restarting...`);
@@ -173,8 +187,7 @@ export class WallpaperServer {
                 if (finalStatus && finalStatus.running) {
                     const msg = `Port ${port} is still occupied by another process. Please close other VS Code windows or kill the process manually.`;
                     console.error(`[server launch] ${msg}`);
-                    vscode.window.showErrorMessage(msg);
-                    return; // ABORT
+                    throw new Error(msg);
                 }
             }
         }
@@ -186,14 +199,7 @@ export class WallpaperServer {
         this.entryFile = entryFile || null;
         this.currentLocation = location;
         
-        // [关键] 等待状态保存完成！防止重启后丢失路径
-        await this.context.globalState.update('currentWallpaperPath', rootPath);
-        await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
-        await this.context.globalState.update('currentWallpaperLocation', location);
-
         this.updateSearchPaths(rootPath, location); // [New] Update search paths on server start
-        
-        this.resetShutdownTimer(); // Start the timer
 
         console.log(`[server launch] Creating HTTP server...`);
         this.server = http.createServer((req, res) => {
@@ -252,7 +258,8 @@ export class WallpaperServer {
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.end(JSON.stringify({
                     running: true,
-                    rootPath: this.currentRoot
+                    rootPath: this.currentRoot,
+                    entryFile: this.entryFile
                 }));
                 return;
             }
@@ -773,44 +780,73 @@ ${baseTag}
                     // Optional: Handle messages from clients
                 });
             });
-        } catch (e) {
-            console.error('[Server] Failed to initialize WebSocket Server:', e);
-            vscode.window.showErrorMessage('Failed to start WebSocket Server. Real-time settings will not work.');
+        } catch (error) {
+            console.error('[Server] Failed to initialize WebSocket Server:', error);
+            await this.stop();
+            throw error;
         }
         
         console.log(`[server launch] Setting up server listeners`);
-        vscode.window.setStatusBarMessage(`Wallpaper Server: Running at port ${this.PORT}!`, 5000);
-        // 启动监听
-        this.server.listen(this.PORT, '127.0.0.1', () => {
-            console.log(`[server launch] Wallpaper Server started on port ${this.PORT}`);
-            if (!silent) {
-                // 开发阶段提示一下，确保你知道它起来了
-                vscode.window.setStatusBarMessage(`Wallpaper Server: Running at port ${this.PORT}`, 5000);
+        try {
+            const listening = waitForServerListening(this.server, SERVER_STARTUP_TIMEOUT_MS);
+            try {
+                this.server.listen(this.PORT, '127.0.0.1');
+            } catch (error) {
+                this.server.emit('error', error instanceof Error ? error : new Error(String(error)));
             }
-        });
-
-        this.server.on('error', (err: any) => {
-            console.log(`[server launch] Server error: ${err.message}`);
-            if (err.code === 'EADDRINUSE') {
-                console.log(`Port ${this.PORT} is busy. Switching to standby mode.`);
-                this.startWatchdog();
-            } else {
-                vscode.window.showErrorMessage(`壁纸服务器启动失败: ${err.message}`);
+            await listening;
+            const address = this.server.address();
+            if (address && typeof address !== 'string') {
+                this.PORT = address.port;
             }
-        });
+        } catch (error) {
+            console.error('[server launch] Server failed to listen:', error);
+            await this.stop();
+            throw error;
+        }
 
-        // 发一个 /ping 请求，确认服务器已启动
-        console.log(`[Server] Sending /ping request to confirm server startup`);
-        const req = http.get(`http://127.0.0.1:${this.PORT}/ping`, { agent: false }, (res) => {
-            // log pong
-            vscode.window.setStatusBarMessage(`Wallpaper Server: Success ${res.statusCode}`, 5000);
-            console.log(`[Server] Received /ping response with status: ${res.statusCode}`);
-            res.resume();
-        });
-        req.on('error', (e) => {
-            vscode.window.setStatusBarMessage(`Wallpaper Server: Error starting server`, 5000);
-            console.log(`[Server] /ping request error: ${e.message}`);
-        });
+        this.resetShutdownTimer();
+        await this.context.globalState.update('currentWallpaperPath', rootPath);
+        await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
+        await this.context.globalState.update('currentWallpaperLocation', location);
+        console.log(`[server launch] Wallpaper Server started on port ${this.PORT}${silent ? ' (silent)' : ''}`);
+    }
+
+    public async verifyHealth(timeoutMs = SERVER_PREFLIGHT_TIMEOUT_MS): Promise<void> {
+        let response;
+        try {
+            response = await requestLocalEndpoint(this.PORT, '/status', timeoutMs);
+        } catch (error) {
+            throw new WallpaperPreflightError('health', '壁纸服务器健康检查失败', { cause: error });
+        }
+        if (response.statusCode !== 200) {
+            throw new WallpaperPreflightError('health', `壁纸服务器健康检查返回 HTTP ${response.statusCode}`);
+        }
+        try {
+            const status = JSON.parse(response.body) as { running?: boolean };
+            if (status.running !== true) {
+                throw new Error('running 状态无效');
+            }
+        } catch (error) {
+            throw new WallpaperPreflightError('health', '壁纸服务器健康检查响应无效', { cause: error });
+        }
+        console.log(`[Server Preflight] Health check passed on port ${this.PORT}`);
+    }
+
+    public async verifyEntry(timeoutMs = SERVER_PREFLIGHT_TIMEOUT_MS): Promise<void> {
+        let response;
+        try {
+            response = await requestLocalEndpoint(this.PORT, '/api/get-entry', timeoutMs);
+        } catch (error) {
+            throw new WallpaperPreflightError('entry', '壁纸入口检查失败', { cause: error });
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw new WallpaperPreflightError('entry', `壁纸入口返回 HTTP ${response.statusCode}`);
+        }
+        if (!response.contentType.toLowerCase().startsWith('text/html')) {
+            throw new WallpaperPreflightError('entry', `壁纸入口内容类型无效: ${response.contentType || '缺失'}`);
+        }
+        console.log(`[Server Preflight] Entry check passed on port ${this.PORT}`);
     }
 
     private updateSearchPaths(rootPath: string, location?: string) {
@@ -881,34 +917,6 @@ ${baseTag}
         console.log(`[add file] Final searchPaths: ${JSON.stringify(this.searchPaths)}`);
     }
 
-    private startWatchdog() {
-        if (this.retryInterval) { clearInterval(this.retryInterval); }
-        console.log('[Server] Watchdog started. Waiting for port to be free...');
-        
-        this.retryInterval = setInterval(() => {
-            // 尝试连接端口，看是否有人在监听
-            const req = http.get(`http://127.0.0.1:${this.PORT}/ping`, { agent: false }, (res) => {
-                // 连接成功，说明主服务器还活着，什么都不做
-                res.resume();
-            });
-
-            req.on('error', (e) => {
-                // 连接失败，说明主服务器可能挂了
-                console.log('[Server] Primary server unreachable. Attempting to take over...');
-                // 停止 watchdog，尝试启动服务器
-                if (this.retryInterval) { clearInterval(this.retryInterval); }
-                this.retryInterval = null;
-                this.start(this.currentRoot, this.PORT, this.entryFile || undefined, this.currentLocation, true);
-            });
-            
-            // 设置超时，防止请求挂起
-            req.setTimeout(2000, () => {
-                req.destroy();
-            });
-
-        }, 5000); // 每 5 秒检查一次
-    }
-
     public async stop(): Promise<void> {
         if (this.shutdownTimeout) {
             clearTimeout(this.shutdownTimeout);
@@ -918,18 +926,18 @@ ${baseTag}
             this.wss.close();
             this.wss = null;
         }
-        if (this.retryInterval) {
-            clearInterval(this.retryInterval);
-            this.retryInterval = null;
-        }
         if (this.server) {
             const activeServer = this.server;
             this.server = null;
             if (typeof activeServer.closeAllConnections === 'function') {
                 activeServer.closeAllConnections();
             }
-            await new Promise<void>(resolve => {
-                activeServer.close(() => resolve());
+            await new Promise<void>((resolve, reject) => {
+                if (!activeServer.listening) {
+                    resolve();
+                    return;
+                }
+                activeServer.close(error => error ? reject(error) : resolve());
             });
         }
         console.log('[Server] Server stopped.');

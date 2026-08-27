@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { getWallpaperById, scanWallpapers } from '../core/scanner';
+import { getWallpaperById, scanWallpapers, scanWallpapersWithDiagnostics } from '../core/scanner';
 import { WallpaperType } from '../core/types';
 
 suite('Scanner Test Suite', () => {
@@ -151,5 +151,107 @@ suite('Scanner Test Suite', () => {
 
         const items = scanWallpapers(tempDir);
         assert.strictEqual(items.length, 0);
+    });
+
+    test('scanWallpapersWithDiagnostics should summarize available and unsupported wallpapers', () => {
+        const videoDir = path.join(tempDir, 'video');
+        const sceneDir = path.join(tempDir, 'scene');
+        fs.mkdirSync(videoDir);
+        fs.mkdirSync(sceneDir);
+        fs.writeFileSync(path.join(videoDir, 'project.json'), JSON.stringify({
+            title: 'Video',
+            file: 'video.mp4',
+            type: 'video'
+        }));
+        fs.writeFileSync(path.join(sceneDir, 'project.json'), JSON.stringify({
+            title: 'Scene',
+            file: 'scene.pkg',
+            type: 'scene'
+        }));
+
+        const result = scanWallpapersWithDiagnostics(tempDir);
+
+        assert.deepStrictEqual(result.statistics, {
+            totalDirectories: 2,
+            available: 1,
+            corrupted: 0,
+            unsupported: 1,
+            permissionDenied: 0
+        });
+        assert.strictEqual(result.items.length, 1);
+        assert.strictEqual(result.diagnostics.length, 1);
+        assert.strictEqual(result.diagnostics[0].category, 'unsupported');
+        assert.strictEqual(result.diagnostics[0].wallpaperId, 'scene');
+    });
+
+    test('scanWallpapersWithDiagnostics should report malformed metadata as corrupted', () => {
+        const wpDir = path.join(tempDir, 'malformed');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), '{ invalid json ');
+
+        const result = scanWallpapersWithDiagnostics(tempDir);
+
+        assert.strictEqual(result.statistics.totalDirectories, 1);
+        assert.strictEqual(result.statistics.corrupted, 1);
+        assert.strictEqual(result.diagnostics.length, 1);
+        assert.strictEqual(result.diagnostics[0].category, 'corrupted');
+        assert.match(result.diagnostics[0].message, /project\.json/);
+        assert.ok(result.diagnostics[0].cause instanceof Error);
+    });
+
+    test('scanWallpapersWithDiagnostics should report missing metadata as corrupted', () => {
+        fs.mkdirSync(path.join(tempDir, 'missing-metadata'));
+
+        const result = scanWallpapersWithDiagnostics(tempDir);
+
+        assert.strictEqual(result.statistics.corrupted, 1);
+        assert.strictEqual(result.diagnostics[0].category, 'corrupted');
+        assert.match(result.diagnostics[0].message, /缺少 project\.json/);
+    });
+
+    test('scanWallpapersWithDiagnostics should emit each diagnostic to the logger', () => {
+        const wpDir = path.join(tempDir, 'unsupported');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
+            title: 'Unsupported',
+            type: 'scene'
+        }));
+        const loggedMessages: string[] = [];
+
+        const result = scanWallpapersWithDiagnostics(tempDir, diagnostic => {
+            loggedMessages.push(`${diagnostic.category}:${diagnostic.wallpaperId}`);
+        });
+
+        assert.strictEqual(result.statistics.unsupported, 1);
+        assert.deepStrictEqual(loggedMessages, ['unsupported:unsupported']);
+    });
+
+    test('scanWallpapersWithDiagnostics should classify permission errors', () => {
+        const wpDir = path.join(tempDir, 'permission-denied');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({ type: 'web' }));
+        const fsModule = require('fs') as typeof fs;
+        const originalStatSync = fsModule.statSync;
+        const deniedPath = path.join(wpDir, 'project.json');
+        const deniedStatSync = ((target: fs.PathLike) => {
+            if (path.resolve(target.toString()) === path.resolve(deniedPath)) {
+                const error = new Error('permission denied') as NodeJS.ErrnoException;
+                error.code = 'EACCES';
+                throw error;
+            }
+            return originalStatSync(target);
+        }) as typeof fs.statSync;
+        Object.defineProperty(fsModule, 'statSync', { configurable: true, value: deniedStatSync });
+
+        try {
+            const result = scanWallpapersWithDiagnostics(tempDir);
+
+            assert.strictEqual(result.statistics.permissionDenied, 1);
+            assert.strictEqual(result.statistics.corrupted, 0);
+            assert.strictEqual(result.diagnostics[0].category, 'permissionDenied');
+            assert.ok(result.diagnostics[0].cause instanceof Error);
+        } finally {
+            Object.defineProperty(fsModule, 'statSync', { configurable: true, value: originalStatSync });
+        }
     });
 });
