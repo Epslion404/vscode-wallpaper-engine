@@ -4,6 +4,18 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.0] - 2026-08-28
+
+### Added
+
+- 透明化规则表支持按位置名称、英文名称和颜色键名查询，并按常用程度默认排序。
+- 新增编辑器行号、折叠和断点边栏背景 `editorGutter.background` 的透明化控制。
+- 透明化规则名称统一显示为“位置描述（键名）”，并支持中英文界面切换。
+
+### Fixed
+
+- 改进 Wallpaper Settings 规则表的筛选与回显体验，便于快速定位和调整透明化目标。
+
 ## [0.0.13] - 2026-08-28
 
 ### Added
