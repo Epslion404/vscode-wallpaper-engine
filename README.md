@@ -18,6 +18,8 @@
 - **智能配色**: 自动适配当前主题颜色，支持自定义透明基底颜色，确保在任何主题下都能获得完美的视觉效果。
 - **自定义增强**: 支持注入自定义 CSS 和 JavaScript，随心所欲定制你的编辑器外观。
 - **热重载**: 修改配置或切换壁纸后，无需重启即可预览部分效果（完整注入需重启）。
+- **C/C++ Theme 兼容**: 自动识别 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题，避免现代 UI shell 在加载完成后覆盖壁纸。
+- **中英双语设置面板**: Wallpaper Settings 支持 `auto`、中文和 English，可运行时切换并持久化。
 
 ## 🚀 快速开始
 
@@ -48,6 +50,8 @@
 
 - `vscode-wallpaper-engine.workshopPath`: Wallpaper Engine 创意工坊文件夹路径 (ID: 431960)。
 - `vscode-wallpaper-engine.serverPort`: 本地壁纸服务器端口 (默认 23333)。
+- `vscode-wallpaper-engine.themeCompatibility`: C/C++ Theme 兼容模式：`auto`（默认，仅检测到冲突主题时启用）、`on`、`off`。
+- `vscode-wallpaper-engine.uiLanguage`: Wallpaper Settings 语言：`auto`（跟随 VS Code 语言）、`zh-CN` 或 `en-US`。
 
 ### 透明化设置 (Transparency)
 
@@ -78,6 +82,11 @@
 - 一键切换壁纸。
 - **可视化调节透明度**: 提供滑块和开关，实时预览配置变更。
 - 编辑自定义 CSS。
+- 在顶部语言选择器切换中文或 English；选择会保存到用户级设置。
+
+### C/C++ Theme 冲突排查
+
+如果壁纸只在 VS Code 启动瞬间出现、随后变成黑色，通常是 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题重新设置了现代 UI shell 背景。插件会在 `themeCompatibility=auto` 下自动注入针对性透明规则，不会卸载或禁用该主题扩展。仍有问题时可在设置中手动将 `themeCompatibility` 设为 `on`，并执行一次 `Developer: Reload Window`。
 
 ### 卸载插件
 

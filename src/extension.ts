@@ -23,6 +23,7 @@ import {
 import { LifecycleState } from './core/lifecycle-state';
 import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
 import { evaluateUninstallSupersession, isPendingSetupState, needsWallpaperInjection } from './core/wallpaper-runtime';
+import { extractThemeDescriptors, shouldApplyThemeCompatibility } from './core/theme-compatibility';
 
 // test
 import { openTestPage } from './playground/page';
@@ -93,6 +94,24 @@ export async function activate(context: vscode.ExtensionContext) {
     initializeTransparencyState(context);
     lifecycle = new LifecycleState(context.globalState.get<boolean>(DISABLED_KEY) ?? false);
     const initialConfig = getConfiguration();
+    const getThemeCompatibility = (config: ReturnType<typeof getConfiguration>) => {
+        const descriptors = vscode.extensions.all.flatMap(extension => {
+            const packageJson: unknown = extension.packageJSON;
+            return extractThemeDescriptors(extension.id, packageJson);
+        });
+        return shouldApplyThemeCompatibility({
+            colorTheme: vscode.workspace.getConfiguration('workbench').get<string>('colorTheme') ?? '',
+            descriptors,
+            mode: config.themeCompatibility
+        });
+    };
+    const syncServerCssConfig = (config: ReturnType<typeof getConfiguration> = getConfiguration()) => {
+        const decision = getThemeCompatibility(config);
+        server?.updateCssConfig({ customCss: config.customCss, themeCompatibility: decision.enabled });
+        output.info('theme-compatibility', `主题兼容模式=${config.themeCompatibility}，当前主题=${decision.theme ?? 'unknown'}，应用=${decision.enabled}（${decision.reason}）`);
+        return decision;
+    };
+    syncServerCssConfig(initialConfig);
     const pendingUninstallCandidate: unknown = context.globalState.get(PENDING_UNINSTALL_KEY);
     let pendingUninstall = isPendingUninstall(pendingUninstallCandidate)
         ? pendingUninstallCandidate
@@ -310,9 +329,7 @@ export async function activate(context: vscode.ExtensionContext) {
             
             if (server) {
                 await server.start(item.dirPath, config.serverPort, fileName, item.location);
-                server.updateCssConfig({
-                    customCss: config.customCss
-                });
+                syncServerCssConfig(config);
             }
 
             await performInjection(filePath, type, config.opacity, config.serverPort, config.resizeDelay, config.startupCheckInterval, false, SHOW_DEBUG_SIDEBAR);
@@ -351,9 +368,22 @@ export async function activate(context: vscode.ExtensionContext) {
         const changedKeys = [
             'wallpaperId', 'workshopPath', 'backgroundOpacity', 'serverPort',
             'resizeDelay', 'startupCheckInterval', 'customCss',
-            'transparencyEnabled', 'transparencyRules', 'transparencyBaseColor'
+            'transparencyEnabled', 'transparencyRules', 'transparencyBaseColor',
+            'themeCompatibility', 'uiLanguage'
         ].filter(key => e.affectsConfiguration(`vscode-wallpaper-engine.${key}`));
         const { wallpaper, transparency } = classifyConfigurationChange(changedKeys);
+
+        if (changedKeys.includes('themeCompatibility')) {
+            const config = getConfiguration();
+            syncServerCssConfig(config);
+            if (server?.getCurrentRoot()) {
+                await server.triggerReload();
+            }
+            await applyTransparencyPatch();
+        }
+        if (changedKeys.includes('uiLanguage')) {
+            SettingsPanel.publishLanguage(getConfiguration().uiLanguage);
+        }
 
         if (wallpaper && changedKeys.length === 1 && changedKeys[0] === 'wallpaperId') {
              const config = getConfiguration();
@@ -387,6 +417,11 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!lifecycle || lifecycle.disabled || lifecycle.currentOperation !== undefined) { return; }
             if (!lifecycle.tryBegin('setup')) { return; }
             try {
+                const config = getConfiguration();
+                syncServerCssConfig(config);
+                if (server?.getCurrentRoot()) {
+                    await server.triggerReload();
+                }
                 await applyTransparencyPatch();
             } finally {
                 lifecycle.end('setup');
@@ -550,7 +585,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     startServer: async input => {
                         if (!server) { throw new Error('壁纸服务器未初始化'); }
                         await server.start(input.dirPath, input.port, input.fileName, input.location, true);
-                        server.updateCssConfig({ customCss: config.customCss });
+                        syncServerCssConfig(config);
                     },
                     verifyHealth: async () => {
                         if (!server) { throw new Error('壁纸服务器未初始化'); }
@@ -589,7 +624,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 oldWallpaper.location,
                                 true
                             );
-                            server.updateCssConfig({ customCss: config.customCss });
+                            syncServerCssConfig(config);
                             await server.verifyHealth();
                             await server.verifyEntry();
                             await performInjection(
@@ -759,9 +794,7 @@ export async function activate(context: vscode.ExtensionContext) {
             
             if (server) {
                 const currentConfig = getConfiguration();
-                server.updateCssConfig({
-                    customCss: content
-                });
+                syncServerCssConfig({ ...currentConfig, customCss: content });
                 server.triggerReload();
                 vscode.window.setStatusBarMessage('Wallpaper CSS Updated', 2000);
             }

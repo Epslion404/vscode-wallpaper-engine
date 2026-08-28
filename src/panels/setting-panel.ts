@@ -5,6 +5,7 @@ import { WallpaperServer } from '../core/server';
 import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch } from '../core/config-patcher';
 import { WallpaperSetupViewState } from '../core/wallpaper-setup';
 import { toUserErrorReason } from '../core/user-message';
+import { isUiLanguage, resolveUiLanguage, UiLanguage } from './localization';
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -22,7 +23,8 @@ export type SettingsPanelMessage =
     | { command: 'updateCss'; customCss: string }
     | { command: 'updateTransparencyRules'; rules: Record<string, number> }
     | { command: 'toggleTransparency'; enabled: boolean }
-    | { command: 'updateTransparencyBaseColor'; color: string };
+    | { command: 'updateTransparencyBaseColor'; color: string }
+    | { command: 'setLanguage'; language: UiLanguage };
 
 type CommandWithoutPayload = Extract<SettingsPanelMessage, { command:
     | 'ready'
@@ -110,6 +112,9 @@ export function parseSettingsPanelMessage(message: unknown): SettingsPanelMessag
     if (command === 'updateTransparencyBaseColor') {
         return typeof message.color === 'string' ? { command, color: message.color } : undefined;
     }
+    if (command === 'setLanguage') {
+        return isUiLanguage(message.language) ? { command, language: message.language } : undefined;
+    }
     return undefined;
 }
 
@@ -152,6 +157,11 @@ export class SettingsPanel {
         void SettingsPanel.currentPanel?._panel.webview.postMessage({ type: 'setupState', state });
     }
 
+    public static publishLanguage(language: UiLanguage): void {
+        const resolved = resolveUiLanguage(language, vscode.env.language);
+        void SettingsPanel.currentPanel?._panel.webview.postMessage({ type: 'language', language, resolvedLanguage: resolved });
+    }
+
     public dispose() {
         SettingsPanel.currentPanel = undefined;
         this._panel.dispose();
@@ -176,6 +186,18 @@ export class SettingsPanel {
                     });
                 } else if (message.command === 'ready') {
                     await webview.postMessage({ type: 'setupState', state: SettingsPanel.setupState });
+                    const configured = vscode.workspace.getConfiguration('vscode-wallpaper-engine').get<unknown>('uiLanguage');
+                    const language = isUiLanguage(configured) ? configured : 'auto';
+                    await webview.postMessage({ type: 'language', language, resolvedLanguage: resolveUiLanguage(language, vscode.env.language) });
+                } else if (message.command === 'setLanguage') {
+                    try {
+                        await vscode.workspace.getConfiguration('vscode-wallpaper-engine')
+                            .update('uiLanguage', message.language, vscode.ConfigurationTarget.Global);
+                        SettingsPanel.publishLanguage(message.language);
+                    } catch (error: unknown) {
+                        console.error('[Panel] Failed to save UI language:', error);
+                        await vscode.window.showErrorMessage(`保存界面语言失败：${toUserErrorReason(error)}`);
+                    }
                 } else if (message.command === 'updateGeneral') {
                     // Handle general settings (audio, mic, etc.)
                     // We'll send a specific message type for these
@@ -282,6 +304,8 @@ export class SettingsPanel {
         const transparencyRules = config.get<Record<string, number>>('transparencyRules') || {};
         const transparencyEnabled = config.get<boolean>('transparencyEnabled') ?? true;
         const transparencyBaseColor = config.get<string>('transparencyBaseColor') || '';
+        const configuredLanguage = config.get<unknown>('uiLanguage');
+        const uiLanguage = isUiLanguage(configuredLanguage) ? configuredLanguage : 'auto';
 
         const info = this.server.getCurrentInfo();
         const infoPath = info.root || 'None';
@@ -318,7 +342,8 @@ export class SettingsPanel {
             .replace(/{{transparencyKeys}}/g, JSON.stringify(TRANSPARENT_COLOR_KEYS))
             .replace(/{{transparencyRules}}/g, JSON.stringify(transparencyRules))
             .replace(/{{transparencyEnabled}}/g, JSON.stringify(transparencyEnabled))
-            .replace(/{{transparencyBaseColor}}/g, escapeHtml(transparencyBaseColor));
+            .replace(/{{transparencyBaseColor}}/g, escapeHtml(transparencyBaseColor))
+            .replace(/{{uiLanguage}}/g, JSON.stringify(uiLanguage));
 
         return htmlContent;
     }

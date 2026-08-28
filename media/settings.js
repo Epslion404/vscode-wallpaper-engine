@@ -6,13 +6,89 @@ const setupStatusEl = document.getElementById("setup-status");
 const setupStatusIconEl = document.getElementById("setup-status-icon");
 const setupStatusTextEl = document.getElementById("setup-status-text");
 const switchButton = document.getElementById("btn-switch");
+const languageSelect = document.getElementById("language-select");
+let currentLanguage = "en-US";
+
+const I18N = {
+  "zh-CN": {
+    language: "语言", auto: "自动", chinese: "中文", english: "English",
+    refresh: "刷新", setWallpaper: "设置壁纸", browser: "浏览器", folder: "目录",
+    serverStatus: "服务器状态", testHttp: "测试 HTTP", testWs: "测试 WS", stopServer: "停止服务",
+    wallpaperInfo: "壁纸信息", name: "名称", type: "类型", entry: "入口", path: "路径",
+    search: "搜索设置…", transparencyCss: "透明化与 CSS", customCss: "自定义 CSS",
+    editCss: "在编辑器中编辑", saveCss: "保存 CSS 设置", transparencyRules: "透明化规则",
+    enableTransparency: "启用透明化", baseColor: "基色（可选）", set: "设置",
+    transparencyHint: "切换元素以使其透明。调整不透明度（0 = 完全透明，1 = 完全不透明）。",
+    applyRules: "应用透明化规则", generalSimulation: "通用模拟", wallpaperProperties: "壁纸属性",
+    waiting: "等待操作", loading: "加载中…", checking: "检查中…", failed: "失败", connected: "已连接",
+    stopped: "已停止", unknown: "未知", error: "错误", exception: "异常", invalidColor: "颜色格式无效。请输入十六进制颜色（例如 #1e1e1e），或留空使用自动。"
+  },
+  "en-US": {
+    language: "Language", auto: "Auto", chinese: "中文", english: "English",
+    refresh: "Refresh", setWallpaper: "Set Wallpaper", browser: "Browser", folder: "Folder",
+    serverStatus: "Server Status", testHttp: "Test HTTP", testWs: "Test WS", stopServer: "Stop Server",
+    wallpaperInfo: "Wallpaper Info", name: "Name", type: "Type", entry: "Entry", path: "Path",
+    search: "Search settings…", transparencyCss: "Transparency & CSS", customCss: "Custom CSS",
+    editCss: "Edit in Editor", saveCss: "Save CSS Settings", transparencyRules: "Transparency Rules",
+    enableTransparency: "Enable Transparency", baseColor: "Base Color (Optional)", set: "Set",
+    transparencyHint: "Toggle elements to make them transparent. Adjust opacity (0 = Invisible, 1 = Opaque).",
+    applyRules: "Apply Transparency Rules", generalSimulation: "General Simulation", wallpaperProperties: "Wallpaper Properties",
+    waiting: "Waiting for operation", loading: "Loading…", checking: "Checking…", failed: "Failed", connected: "Connected",
+    stopped: "Stopped", unknown: "Unknown", error: "Error", exception: "Exception", invalidColor: "Invalid color format. Use Hex (e.g. #1e1e1e) or leave empty for Auto."
+  }
+};
+
+function t(key) {
+  return (I18N[currentLanguage] && I18N[currentLanguage][key]) || I18N["en-US"][key] || key;
+}
+
+function localizeStatusMessage(message) {
+  if (currentLanguage === "zh-CN" || !message) return message;
+  const exact = {
+    "等待操作": "Waiting for operation", "未找到可用壁纸": "No usable wallpapers found", "已取消设置壁纸": "Wallpaper setup cancelled",
+    "正在检查扩展配置…": "Checking extension configuration…", "正在扫描壁纸库…": "Scanning wallpaper library…", "正在等待选择壁纸…": "Waiting for wallpaper selection…",
+    "正在校验壁纸媒体…": "Validating wallpaper media…", "正在启动本地服务…": "Starting local server…", "正在检查服务状态…": "Checking server status…",
+    "正在验证壁纸入口…": "Verifying wallpaper entry…", "正在应用界面透明化…": "Applying UI transparency…", "正在写入 Workbench…": "Writing Workbench patch…",
+    "正在保存壁纸配置…": "Saving wallpaper configuration…", "正在重新加载窗口…": "Reloading window…"
+  };
+  return exact[message] || message;
+}
+
+function applyLanguage(language, resolvedLanguage) {
+  currentLanguage = resolvedLanguage || (language === "zh-CN" ? "zh-CN" : "en-US");
+  document.documentElement.lang = currentLanguage;
+  if (languageSelect) languageSelect.value = language || "auto";
+  const buttons = {
+    "btn-refresh": "refresh", "btn-switch": "setWallpaper", "btn-browser": "browser", "btn-folder": "folder",
+    "btn-test-http": "testHttp", "btn-test-ws": "testWs", "btn-stop-server": "stopServer",
+    "btn-edit-css": "editCss", "btn-save-css": "saveCss", "btn-save-base-color": "set", "btn-save-transparency": "applyRules"
+  };
+  Object.keys(buttons).forEach((id) => { const el = document.getElementById(id); if (el) el.innerText = t(buttons[id]); });
+  const headers = ["serverStatus", "wallpaperInfo", "transparencyCss", "transparencyRules", "generalSimulation", "wallpaperProperties"];
+  document.querySelectorAll(".section-header").forEach((el, index) => { if (headers[index]) el.innerText = t(headers[index]); });
+  const labels = document.querySelectorAll("#setup-status-text, label[for='language-select']");
+  if (labels[1]) labels[1].innerText = t("language");
+  const search = document.getElementById("search-input"); if (search) search.placeholder = t("search");
+  const customCssLabel = document.querySelector("#input-custom-css")?.parentElement?.parentElement?.querySelector("label"); if (customCssLabel) customCssLabel.innerText = t("customCss");
+  const baseColor = document.getElementById("input-base-color"); if (baseColor) baseColor.placeholder = currentLanguage === "zh-CN" ? "自动（例如 #1e1e1e）" : "Auto (e.g. #1e1e1e)";
+  const transparency = document.querySelector("#chk-transparency-enabled");
+  if (transparency && transparency.parentElement && transparency.parentElement.parentElement) transparency.parentElement.parentElement.firstChild.textContent = t("enableTransparency");
+  const baseRow = baseColor && baseColor.parentElement && baseColor.parentElement.parentElement;
+  if (baseRow) baseRow.firstChild.textContent = t("baseColor");
+  const hint = document.querySelector("#transparencyPanel")?.previousElementSibling; if (hint) hint.innerText = t("transparencyHint");
+  const infoLabels = document.querySelectorAll("#info-name, #info-type, #info-entry, #info-path");
+  ["name", "type", "entry", "path"].forEach((key, index) => { const el = infoLabels[index]?.parentElement?.querySelector("strong"); if (el) el.innerText = `${t(key)}:`; });
+  renderGeneralSettings();
+  if (window.lastWallpaperProject) renderUI(window.lastWallpaperProject);
+}
 
 function renderSetupState(state) {
+  window.lastSetupState = state;
   const status = state && state.status ? state.status : "idle";
   const icons = { idle: "i", running: "…", success: "✓", error: "!" };
   setupStatusEl.dataset.status = status;
   setupStatusIconEl.innerText = icons[status] || "i";
-  setupStatusTextEl.innerText = state.message || "等待操作";
+  setupStatusTextEl.innerText = localizeStatusMessage(state.message) || t("waiting");
   switchButton.disabled = status === "running";
 }
 
@@ -20,6 +96,15 @@ window.addEventListener("message", (event) => {
   if (event.data && event.data.type === "setupState") {
     renderSetupState(event.data.state);
   }
+  if (event.data && event.data.type === "language") {
+    applyLanguage(event.data.language, event.data.resolvedLanguage);
+    renderSetupState({ ...window.lastSetupState, message: window.lastSetupState?.message || t("waiting") });
+  }
+});
+
+languageSelect?.addEventListener("change", () => {
+  vscode.postMessage({ command: "setLanguage", language: languageSelect.value });
+  applyLanguage(languageSelect.value, languageSelect.value === "zh-CN" ? "zh-CN" : languageSelect.value === "en-US" ? "en-US" : currentLanguage);
 });
 
 vscode.postMessage({ command: "ready" });
@@ -170,15 +255,15 @@ function renderGeneralSettings() {
   const audioDiv = document.createElement("div");
   audioDiv.className = "control-item";
   const audioLbl = document.createElement("label");
-  audioLbl.innerText = "Audio Source";
+  audioLbl.innerText = currentLanguage === "zh-CN" ? "音频源" : "Audio Source";
   audioDiv.appendChild(audioLbl);
 
   const audioSelect = document.createElement("select");
   const audioOptions = [
-    { value: "simulate", label: "Simulate (Sine Wave)" },
-    { value: "mic", label: "Microphone (Real Audio)" },
-    { value: "system", label: "System Audio (Screen Share)" },
-    { value: "off", label: "Off (Silence)" },
+    { value: "simulate", label: currentLanguage === "zh-CN" ? "模拟（正弦波）" : "Simulate (Sine Wave)" },
+    { value: "mic", label: currentLanguage === "zh-CN" ? "麦克风（实时音频）" : "Microphone (Real Audio)" },
+    { value: "system", label: currentLanguage === "zh-CN" ? "系统音频（屏幕共享）" : "System Audio (Screen Share)" },
+    { value: "off", label: currentLanguage === "zh-CN" ? "关闭（静音）" : "Off (Silence)" },
   ];
   audioOptions.forEach((opt) => {
     const o = document.createElement("option");
@@ -194,7 +279,7 @@ function renderGeneralSettings() {
   const generalProps = [
     {
       key: "audioVolume",
-      label: "Audio Volume (0-100)",
+      label: currentLanguage === "zh-CN" ? "音量（0-100）" : "Audio Volume (0-100)",
       type: "slider",
       min: 0,
       max: 100,
@@ -491,7 +576,7 @@ console.log("Settings Webview Loaded");
 renderGeneralSettings(); // Render general settings immediately
 fetch(SERVER_ROOT + "/project.json")
   .then((res) => res.json())
-  .then((json) => renderUI(json))
+  .then((json) => { window.lastWallpaperProject = json; renderUI(json); })
   .catch(
     (e) =>
       (document.getElementById("propsPanel").innerText = "Error: " + e.message)

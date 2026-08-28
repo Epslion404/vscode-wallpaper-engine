@@ -108,7 +108,8 @@ export class WallpaperServer {
     private currentLocation: string | undefined;
 
     private cssConfig = {
-        customCss: ''
+        customCss: '',
+        themeCompatibility: false
     };
 
     public getCurrentInfo() {
@@ -123,8 +124,11 @@ export class WallpaperServer {
         return this.currentRoot;
     }
 
-    public updateCssConfig(config: { customCss: string }) {
-        this.cssConfig = config;
+    public updateCssConfig(config: { customCss?: string; themeCompatibility?: boolean }) {
+        this.cssConfig = {
+            customCss: config.customCss ?? this.cssConfig.customCss,
+            themeCompatibility: config.themeCompatibility ?? this.cssConfig.themeCompatibility
+        };
     }
 
     constructor(private context: vscode.ExtensionContext) {

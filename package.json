@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/vakesamahere/vscode-wallpaper-engine.git"
   },
-  "version": "0.0.10",
+  "version": "0.0.11",
   "engines": {
     "vscode": "^1.106.1"
   },
@@ -79,6 +79,18 @@
           "default": "",
           "description": "自定义注入的 CSS 代码",
           "editPresentation": "multilineText"
+        },
+        "vscode-wallpaper-engine.themeCompatibility": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "auto",
+          "description": "C/C++ Theme 兼容模式 / C/C++ Theme compatibility mode (auto detects Visual Studio C/C++ themes)"
+        },
+        "vscode-wallpaper-engine.uiLanguage": {
+          "type": "string",
+          "enum": ["auto", "zh-CN", "en-US"],
+          "default": "auto",
+          "description": "Wallpaper Settings 界面语言 / Wallpaper Settings UI language"
         },
         "vscode-wallpaper-engine.transparencyEnabled": {
           "type": "boolean",

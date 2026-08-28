@@ -2,18 +2,20 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { getConfigValidationError, validateConfig } from '../config';
+import { AppConfig, getConfigValidationError, validateConfig } from '../config';
 
 suite('Config Test Suite', () => {
     test('validateConfig should return false for empty path', () => {
-        const config = { 
+        const config: AppConfig = {
             workshopPath: '', 
             opacity: 0.5,
             serverPort: 23333,
             wallpaperId: '',
             resizeDelay: 500,
             startupCheckInterval: 300,
-            customCss: ''
+            customCss: '',
+            themeCompatibility: 'auto',
+            uiLanguage: 'auto'
         };
         const result = validateConfig(config);
         assert.strictEqual(result, false);
@@ -26,15 +28,18 @@ suite('Config Test Suite', () => {
         fs.writeFileSync(filePath, 'test');
 
         try {
-            const result = validateConfig({
+            const config: AppConfig = {
                 workshopPath: filePath,
                 opacity: 0.5,
                 serverPort: 23333,
                 wallpaperId: '',
                 resizeDelay: 500,
                 startupCheckInterval: 300,
-                customCss: ''
-            });
+                customCss: '',
+                themeCompatibility: 'auto',
+                uiLanguage: 'auto'
+            };
+            const result = validateConfig(config);
 
             assert.strictEqual(result, false);
         } finally {

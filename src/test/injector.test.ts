@@ -36,8 +36,6 @@ suite('Injector security boundary', () => {
         const css = getWorkbenchTransparencyCss();
         assert.match(css, /html\s*,\s*body/);
         assert.match(css, /\.monaco-workbench/);
-        assert.match(css, /\.monaco-grid-view/);
-        assert.match(css, /--modern-ui-shell-background:\s*transparent\s*!important/);
         assert.match(css, /div\[role="application"\]/);
         assert.match(css, /background:\s*transparent\s*!important/);
     });

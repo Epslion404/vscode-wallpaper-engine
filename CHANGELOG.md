@@ -4,6 +4,17 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.11] - 2026-08-28
+
+### Added
+
+- Wallpaper Settings 新增 `auto`、中文、English 三种界面语言，可即时切换并持久化。
+- 新增 `themeCompatibility` 配置，自动识别并兼容 C/C++ Theme 的现代 UI shell 背景覆盖。
+
+### Fixed
+
+- 修复启用 `ms-vscode.cpptools-themes` 后壁纸在 Workbench 完成加载时被黑色背景覆盖的问题。
+
 ## [0.0.10] - 2026-08-28
 
 ### Fixed

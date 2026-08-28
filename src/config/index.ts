@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { ThemeCompatibilityMode, isThemeCompatibilityMode } from '../core/theme-compatibility';
+import { UiLanguage, isUiLanguage } from '../panels/localization';
 
 export interface AppConfig {
     workshopPath: string;
@@ -9,6 +11,8 @@ export interface AppConfig {
     resizeDelay: number;
     startupCheckInterval: number;
     customCss: string;
+    themeCompatibility: ThemeCompatibilityMode;
+    uiLanguage: UiLanguage;
 }
 
 export function getConfiguration(): AppConfig {
@@ -20,8 +24,14 @@ export function getConfiguration(): AppConfig {
     const resizeDelay = config.get<number>('resizeDelay') || 500;
     const startupCheckInterval = config.get<number>('startupCheckInterval') || 300;
     const customCss = config.get<string>('customCss') || '';
+    const configuredThemeCompatibility = config.get<unknown>('themeCompatibility');
+    const themeCompatibility = isThemeCompatibilityMode(configuredThemeCompatibility)
+        ? configuredThemeCompatibility
+        : 'auto';
+    const configuredUiLanguage = config.get<unknown>('uiLanguage');
+    const uiLanguage = isUiLanguage(configuredUiLanguage) ? configuredUiLanguage : 'auto';
 
-    return { workshopPath, opacity, serverPort, wallpaperId, resizeDelay, startupCheckInterval, customCss };
+    return { workshopPath, opacity, serverPort, wallpaperId, resizeDelay, startupCheckInterval, customCss, themeCompatibility, uiLanguage };
 }
 
 export function getConfigValidationError(config: AppConfig): string | undefined {

@@ -67,6 +67,12 @@
 - **重载信号**: 如果服务器需要客户端刷新（例如切换了壁纸），`/ping` 接口会返回 `205` 状态码。客户端脚本检测到 `205` 后，会重新获取壁纸内容并刷新 `iframe`。
 - **多实例复用**: 新版服务器支持 `/status` 接口。启动时会检查端口是否被占用且路径是否一致，从而决定是复用现有服务还是重启服务。
 
+### 2.5 `/config` 与设置面板语言消息
+
+`GET /config` 返回 `{ customCss, themeCompatibility }`。Extension Host 会在当前主题变化或配置变化时更新这两个字段，Workbench 注入脚本据此幂等刷新 CSS。
+
+设置 Webview 启动后发送 `{ command: "ready" }`，Host 回复 `setupState` 和 `{ type: "language", language, resolvedLanguage }`。用户切换语言时发送 `{ command: "setLanguage", language: "auto" | "zh-CN" | "en-US" }`，Host 严格校验并保存到用户级配置，再广播新的解析语言。
+
 ## 3. 常见连接问题排查
 
 如果出现“设置项连接不到服务器”的情况，通常是以下原因：

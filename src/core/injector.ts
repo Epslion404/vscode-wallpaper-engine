@@ -4,6 +4,7 @@ import * as path from 'path';
 import { toVsCodeResourceUrl } from '../utils'; 
 import { saveFilePrivileged } from './admin-saver';
 import { WallpaperType } from './types';
+import { getThemeCompatibilityCss } from './theme-compatibility';
 
 // --- 常量定义 ---
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
@@ -102,11 +103,7 @@ export function getWorkbenchTransparencyCss(): string {
         'div[role="application"] { background: transparent !important; }',
         '.monaco-workbench {',
         '  background: transparent !important;',
-        '  --modern-ui-shell-background: transparent !important;',
         '}',
-        '.monaco-workbench.floating-panels,',
-        '.monaco-workbench.floating-panels > .monaco-grid-view,',
-        '.monaco-grid-view { background: transparent !important; }',
         '.active.empty { background: transparent !important; }',
     ].join(' ');
 }
@@ -379,6 +376,10 @@ ${JS_INJECTION_VERSION_MARKER}
         transparencyStyle.id = 'vscode-wallpaper-transparency';
         document.head.appendChild(transparencyStyle);
 
+        const themeCompatibilityStyle = document.createElement('style');
+        themeCompatibilityStyle.id = 'vscode-wallpaper-theme-compatibility';
+        document.head.appendChild(themeCompatibilityStyle);
+
         async function updateCss() {
             try {
                 console.log("[WP style inj] Fetching config from " + CONFIG_URL);
@@ -387,6 +388,7 @@ ${JS_INJECTION_VERSION_MARKER}
                     const config = await res.json();
                     console.log("[WP style inj] Got config:", config);
                     const css = config.customCss;
+                    const themeCss = config.themeCompatibility ? ${JSON.stringify(getThemeCompatibilityCss())} : '';
                     
                     if (transparencyStyle.textContent !== css) {
                         console.log("[WP style inj] Updating style tag content...");
@@ -394,6 +396,9 @@ ${JS_INJECTION_VERSION_MARKER}
                         console.log("[WP style inj] Update complete.");
                     } else {
                         console.log("[WP style inj] CSS is identical, skipping update.");
+                    }
+                    if (themeCompatibilityStyle.textContent !== themeCss) {
+                        themeCompatibilityStyle.textContent = themeCss;
                     }
                 } else {
                     console.error("[WP style inj] Fetch failed status:", res.status);

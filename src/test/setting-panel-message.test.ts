@@ -32,6 +32,10 @@ suite('Settings panel message protocol', () => {
             { command: 'updateTransparencyBaseColor', color: '#1e1e1e' },
         );
         assert.deepStrictEqual(
+            parseSettingsPanelMessage({ command: 'setLanguage', language: 'en-US' }),
+            { command: 'setLanguage', language: 'en-US' },
+        );
+        assert.deepStrictEqual(
             parseSettingsPanelMessage({
                 command: 'updateTransparencyRules',
                 rules: { 'editor.background': 0, 'sideBar.background': 0.25 },
@@ -68,6 +72,7 @@ suite('Settings panel message protocol', () => {
             { command: 'updateProp', key: '', value: 1 },
             { command: 'updateProp', key: '__proto__', value: 1 },
             { command: 'updateGeneral', key: 'constructor', value: true },
+            { command: 'setLanguage', language: 'fr-FR' },
         ];
 
         for (const message of malformedMessages) {
