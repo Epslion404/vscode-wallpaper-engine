@@ -98,4 +98,4 @@ git diff --check
 
 ## 版本记录
 
-当前版本为 `0.1.0`。用户可见变更统一记录在 [CHANGELOG.md](CHANGELOG.md)；通信协议和本地接口记录在 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)。
+当前版本为 `0.1.1`。用户可见变更统一记录在 [CHANGELOG.md](CHANGELOG.md)；通信协议和本地接口记录在 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)。

@@ -4,7 +4,21 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.1] - 2026-08-28
+
+### Fixed
+
+- 修复更换壁纸后 Workbench 现代 UI shell 覆盖壁纸、启动瞬间可见随后变黑的问题。
+- 将现代 UI shell 透明化提升为基础注入规则，不再依赖 C/C++ Theme 自动识别结果。
+- 将 Workbench 注入协议升级到 `3`，自动迁移仍在使用旧版注入的窗口。
+
+### Documentation
+
+- 更新安装、故障排查、通信边界和开发发布文档，并明确 `0.1.0` 的严重回归状态。
+
 ## [0.1.0] - 2026-08-28
+
+> **严重缺陷，不可用**：该版本在部分 VS Code 版本中更换壁纸后会出现“启动瞬间可见，随后变成黑色背景”的回归。请改用 `0.1.1` 或更高版本。
 
 ### Added
 
