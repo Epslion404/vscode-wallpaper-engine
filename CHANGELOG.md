@@ -4,7 +4,17 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.2] - 2026-08-28
+
+### Fixed
+
+- 修复 Workbench 启动后动态主题样式覆盖透明规则，导致壁纸短暂出现后变黑的问题。
+- 新增运行时透明守护，在 modern UI shell 重建或主题更新后重新应用透明样式。
+- 将 Workbench 注入协议升级到 `4`，自动迁移 `0.1.1` 及更早版本的旧注入。
+
 ## [0.1.1] - 2026-08-28
+
+> **严重缺陷，不可用**：该版本的基础透明 CSS 仍可能被 Workbench 启动后动态加载的主题样式覆盖。请改用 `0.1.2` 或更高版本。
 
 ### Fixed
 
@@ -18,7 +28,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [0.1.0] - 2026-08-28
 
-> **严重缺陷，不可用**：该版本在部分 VS Code 版本中更换壁纸后会出现“启动瞬间可见，随后变成黑色背景”的回归。请改用 `0.1.1` 或更高版本。
+> **严重缺陷，不可用**：该版本在部分 VS Code 版本中更换壁纸后会出现“启动瞬间可见，随后变成黑色背景”的回归。请改用 `0.1.2` 或更高版本。
 
 ### Added
 

@@ -4,6 +4,7 @@ node_modules
 .vscode-test/
 *.vsix
 temp/
+.tmp-cdp-user-*/
 .github/prompts/
 .planning/
 

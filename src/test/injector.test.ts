@@ -42,6 +42,12 @@ suite('Injector security boundary', () => {
         assert.match(css, /\.monaco-grid-view/);
     });
 
+    test('runtime reasserts shell transparency after Workbench theme updates', () => {
+        assert.match(source, /setProperty\(['"]--modern-ui-shell-background['"],\s*['"]transparent['"],\s*['"]important['"]\)/);
+        assert.match(source, /setProperty\(['"]background-color['"],\s*['"]transparent['"],\s*['"]important['"]\)/);
+        assert.match(source, /MutationObserver/);
+    });
+
     test('Workbench restoration delegates user feedback to the extension host', () => {
         assert.ok(!source.includes('showInformationMessage'));
         assert.ok(!source.includes('showErrorMessage'));
@@ -60,11 +66,11 @@ suite('Injector security boundary', () => {
 
     test('outdated Workbench injections are not treated as current', () => {
         assert.strictEqual(
-            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:2] */'),
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:3] */'),
             false,
         );
         assert.strictEqual(
-            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:3] */'),
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:4] */'),
             true,
         );
     });

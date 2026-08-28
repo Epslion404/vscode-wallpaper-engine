@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/visual-studio-marketplace/v/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 
-将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.1.1`。
+将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.1.2`。
 
 本插件通过在 VS Code 核心文件中注入代码，实现了真正的动态背景支持，并提供了强大的 UI 透明化控制功能，让你在享受动态壁纸的同时，依然保持高效的编码体验。
 
@@ -141,7 +141,7 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 
 ### 壁纸只在启动瞬间出现，随后变黑？
 
-这通常是主题扩展或旧版注入在 Workbench 完成加载后重新写入了不透明背景。当前版本会始终覆盖 modern UI shell，并将注入协议升级到 `3`；升级后请重新执行一次“设置壁纸”或重载窗口。若已安装 `ms-vscode.cpptools-themes`，请保持 `themeCompatibility=auto`，必要时改为 `on`。确认冲突后不需要修改壁纸文件。
+这通常是主题扩展或旧版注入在 Workbench 完成加载后重新写入了不透明背景。当前版本会通过运行时守护持续覆盖 modern UI shell，并将注入协议升级到 `4`；升级后请重新执行一次“设置壁纸”或重载窗口。若已安装 `ms-vscode.cpptools-themes`，请保持 `themeCompatibility=auto`，必要时改为 `on`。确认冲突后不需要修改壁纸文件。
 
 ## 🛠️ 开发与发布
 

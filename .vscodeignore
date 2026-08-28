@@ -1,5 +1,7 @@
 .vscode/**
 .vscode-test/**
+.tmp-cdp-user-*/**
+temp/**
 .github/**
 .planning/**
 .nexus-map/**

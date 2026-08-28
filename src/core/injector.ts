@@ -10,7 +10,7 @@ import { getThemeCompatibilityCss } from './theme-compatibility';
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
-const JS_INJECTION_VERSION = '3';
+const JS_INJECTION_VERSION = '4';
 const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
@@ -375,6 +375,46 @@ ${JS_INJECTION_VERSION_MARKER}
         const baseStyle = document.createElement('style');
         baseStyle.textContent = ${JSON.stringify(getWorkbenchTransparencyCss())};
         document.head.appendChild(baseStyle);
+
+        // Workbench 会在启动和切换主题时动态重建 modern UI shell；用内联 !important
+        // 重新确认关键层透明，并监听布局变化，避免后加载样式覆盖壁纸。
+        const enforceWorkbenchTransparency = () => {
+            const workbench = document.querySelector('.monaco-workbench');
+            if (workbench instanceof HTMLElement) {
+                if (workbench.style.getPropertyValue('--modern-ui-shell-background') !== 'transparent'
+                    || workbench.style.getPropertyPriority('--modern-ui-shell-background') !== 'important') {
+                    workbench.style.setProperty('--modern-ui-shell-background', 'transparent', 'important');
+                }
+            }
+            document.querySelectorAll('.monaco-grid-view').forEach(element => {
+                if (!(element instanceof HTMLElement)) { return; }
+                if (element.style.getPropertyValue('background-color') !== 'transparent'
+                    || element.style.getPropertyPriority('background-color') !== 'important') {
+                    element.style.setProperty('background-color', 'transparent', 'important');
+                }
+                if (element.style.getPropertyValue('background') !== 'transparent'
+                    || element.style.getPropertyPriority('background') !== 'important') {
+                    element.style.setProperty('background', 'transparent', 'important');
+                }
+            });
+        };
+        let transparencyFrame = 0;
+        const scheduleTransparencyEnforcement = () => {
+            if (transparencyFrame !== 0) { return; }
+            transparencyFrame = window.requestAnimationFrame(() => {
+                transparencyFrame = 0;
+                enforceWorkbenchTransparency();
+            });
+        };
+        enforceWorkbenchTransparency();
+        console.log('[WP style inj] Installed Workbench transparency guard');
+        const transparencyObserver = new MutationObserver(scheduleTransparencyEnforcement);
+        transparencyObserver.observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            attributeFilter: ['class', 'style']
+        });
 
         // Inject Transparency CSS
         const transparencyStyle = document.createElement('style');
