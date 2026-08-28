@@ -47,6 +47,18 @@ suite('Transparency patch target helpers', () => {
             TRANSPARENCY_COLOR_RULES.map(rule => rule.key),
             TRANSPARENT_COLOR_KEYS,
         );
+        assert.deepStrictEqual(TRANSPARENT_COLOR_KEYS.slice(0, 10), [
+            'editor.background',
+            'editorGutter.background',
+            'sideBar.background',
+            'panel.background',
+            'terminal.background',
+            'editorGroupHeader.tabsBackground',
+            'tab.activeBackground',
+            'tab.inactiveBackground',
+            'activityBar.background',
+            'statusBar.background',
+        ]);
         for (const rule of TRANSPARENCY_COLOR_RULES) {
             assert.ok(rule.labelZh.length > 0);
             assert.ok(rule.labelEn.length > 0);

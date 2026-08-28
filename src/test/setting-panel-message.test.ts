@@ -96,5 +96,8 @@ suite('Settings panel message protocol', () => {
         assert.match(source, /getPreferredTransparencyTarget\(this\.resource\)/);
         assert.match(source, /getSettingsConfiguration\(this\.resource\)\.get<Record<string, number>>\('transparencyRules'\)/);
         assert.match(source, /transparencyDescriptions/);
+        const webview = fs.readFileSync(path.join(__dirname, '..', '..', 'media', 'settings.js'), 'utf8');
+        assert.match(webview, /#propsPanel \.control-item, #transparencyPanel \.control-item/);
+        assert.match(webview, /dataset\.searchText/);
     });
 });

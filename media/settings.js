@@ -230,18 +230,20 @@ setTimeout(() => {
 }, 1000);
 
 // --- Search Handler ---
-document.getElementById("search-input").addEventListener("input", (e) => {
-  const term = e.target.value.toLowerCase();
-  const items = document.querySelectorAll("#propsPanel .control-item");
+const searchInput = document.getElementById("search-input");
+function applySearchFilter() {
+  const term = (searchInput?.value || "").trim().toLowerCase();
+  const items = document.querySelectorAll("#propsPanel .control-item, #transparencyPanel .control-item");
   items.forEach((item) => {
-    const text = item.innerText.toLowerCase();
+    const text = (item.dataset.searchText || item.innerText).toLowerCase();
     if (text.includes(term)) {
       item.classList.remove("hidden");
     } else {
       item.classList.add("hidden");
     }
   });
-});
+}
+searchInput?.addEventListener("input", applySearchFilter);
 
 function getSafeValue(p) {
   if (p.value !== undefined && p.value !== null) {
@@ -582,9 +584,15 @@ function renderTransparencyRules() {
     // Store references for saving
     div.dataset.key = key;
     div.dataset.type = "transparency-rule";
+    div.dataset.searchText = [
+      description?.zhCN || "",
+      description?.enUS || "",
+      key,
+    ].join(" ").toLowerCase();
 
     panel.appendChild(div);
   });
+  applySearchFilter();
 }
 
 document

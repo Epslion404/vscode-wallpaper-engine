@@ -48,7 +48,7 @@ export interface TransparencyColorRule {
 }
 
 // 【透明化目标列表】覆盖 VS Code Theme Color Reference 中常见的可透明背景项。
-export const TRANSPARENCY_COLOR_RULES: readonly TransparencyColorRule[] = [
+const TRANSPARENCY_COLOR_RULES_UNSORTED: readonly TransparencyColorRule[] = [
     { key: 'editor.background', labelZh: '编辑器背景', labelEn: 'Editor background' },
     { key: 'editorGutter.background', labelZh: '编辑器行号与断点边栏背景', labelEn: 'Editor line number and glyph margin background' },
     { key: 'editorPane.background', labelZh: '居中编辑器两侧区域背景', labelEn: 'Editor pane background' },
@@ -178,6 +178,40 @@ export const TRANSPARENCY_COLOR_RULES: readonly TransparencyColorRule[] = [
     { key: 'mergeEditor.change.background', labelZh: '合并编辑器变更背景', labelEn: 'Merge editor change background' },
     { key: 'mergeEditor.changeBase.background', labelZh: '合并编辑器基线变更背景', labelEn: 'Merge editor base change background' },
 ];
+
+const TRANSPARENCY_POPULARITY_ORDER = [
+    'editor.background',
+    'editorGutter.background',
+    'sideBar.background',
+    'panel.background',
+    'terminal.background',
+    'editorGroupHeader.tabsBackground',
+    'tab.activeBackground',
+    'tab.inactiveBackground',
+    'activityBar.background',
+    'statusBar.background',
+    'titleBar.activeBackground',
+    'minimap.background',
+    'editorPane.background',
+    'editorGroup.emptyBackground',
+    'input.background',
+    'menu.background',
+    'quickInput.background',
+    'editorWidget.background',
+    'list.activeSelectionBackground',
+    'settings.textInputBackground',
+] as const;
+
+const transparencyPopularity = new Map<string, number>(
+    TRANSPARENCY_POPULARITY_ORDER.map((key, index) => [key, index]),
+);
+
+// 默认按常用程度排序；未列入热门清单的规则保持原有分组顺序。
+export const TRANSPARENCY_COLOR_RULES: readonly TransparencyColorRule[] = [...TRANSPARENCY_COLOR_RULES_UNSORTED].sort((left, right) => {
+    const leftRank = transparencyPopularity.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = transparencyPopularity.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank;
+});
 
 export const TRANSPARENT_COLOR_KEYS = TRANSPARENCY_COLOR_RULES.map(rule => rule.key);
 
