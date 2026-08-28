@@ -9,6 +9,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Fixed
 
 - 修复 Wallpaper Settings 透明化规则在工作区文件夹作用域下保存后回显旧值的问题。
+- 修复切换到设置页或其他编辑器后，面板重开因活动资源变化而读取旧规则的问题。
 - 增大透明化规则滑块，并在窄窗口中自适应显示。
 
 ## [0.0.11] - 2026-08-28

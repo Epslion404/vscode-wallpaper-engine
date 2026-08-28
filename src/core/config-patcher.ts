@@ -96,13 +96,14 @@ export const TRANSPARENT_COLOR_KEYS = [
  * 自动将 VS Code UI 关键元素的背景色设置为完全透明。
  * @param target 目标配置作用域 (Global、Workspace 或 WorkspaceFolder)
  */
-export async function applyTransparencyPatch(target?: TransparencyPatchTarget) {
-    const resolvedTarget = target ?? getPreferredTransparencyTarget();
-    const config = vscode.workspace.getConfiguration(undefined, getConfigurationResource());
+export async function applyTransparencyPatch(target?: TransparencyPatchTarget, resource?: vscode.Uri) {
+    const resolvedTarget = target ?? getPreferredTransparencyTarget(resource);
+    const configurationResource = resource ?? getConfigurationResource();
+    const config = vscode.workspace.getConfiguration(undefined, configurationResource);
     const enabled = config.get<boolean>('vscode-wallpaper-engine.transparencyEnabled') ?? true;
 
     if (!enabled) {
-        await removeTransparencyPatch(resolvedTarget);
+        await removeTransparencyPatch(resolvedTarget, configurationResource);
         return;
     }
 
@@ -211,7 +212,8 @@ export async function applyTransparencyPatch(target?: TransparencyPatchTarget) {
  * 设置变更回滚等局部操作。
  */
 export async function removeTransparencyPatch(
-    target?: TransparencyPatchTarget | readonly TransparencyPatchTarget[]
+    target?: TransparencyPatchTarget | readonly TransparencyPatchTarget[],
+    resource?: vscode.Uri
 ) {
     const targets = normalizeTransparencyTargets(target);
     const failures: Array<{ target: TransparencyPatchTarget; error: unknown }> = [];
@@ -219,7 +221,7 @@ export async function removeTransparencyPatch(
     // 每个作用域独立处理，保证一个 settings.json 写入失败不会跳过另一个作用域。
     for (const scope of targets) {
         try {
-            await removeTransparencyPatchForTarget(scope);
+            await removeTransparencyPatchForTarget(scope, resource);
         } catch (error) {
             failures.push({ target: scope, error });
             console.error(`[Transparency] Failed to remove ${scope} patch:`, error);
@@ -241,15 +243,15 @@ export class TransparencyPatchRemovalError extends Error {
 }
 
 /** 选择当前资源实际使用的规则配置作用域，避免 Global 写入被文件夹级设置覆盖。 */
-export function getPreferredTransparencyTarget(): TransparencyPatchTarget {
-    return getPreferredConfigurationTarget('transparencyRules');
+export function getPreferredTransparencyTarget(resource?: vscode.Uri): TransparencyPatchTarget {
+    return getPreferredConfigurationTarget('transparencyRules', resource);
 }
 
 /** 读取指定扩展配置的最高优先级作用域，支持工作区文件夹设置。 */
-export function getPreferredConfigurationTarget(section: string): TransparencyPatchTarget {
-    const resource = getConfigurationResource();
+export function getPreferredConfigurationTarget(section: string, resource?: vscode.Uri): TransparencyPatchTarget {
+    const configurationResource = resource ?? getConfigurationResource();
     const inspect = vscode.workspace
-        .getConfiguration('vscode-wallpaper-engine', resource)
+        .getConfiguration('vscode-wallpaper-engine', configurationResource)
         .inspect(section);
     if (inspect?.workspaceFolderValue !== undefined) {
         return vscode.ConfigurationTarget.WorkspaceFolder;
@@ -260,8 +262,8 @@ export function getPreferredConfigurationTarget(section: string): TransparencyPa
     return vscode.ConfigurationTarget.Global;
 }
 
-async function removeTransparencyPatchForTarget(target: TransparencyPatchTarget): Promise<void> {
-    const config = vscode.workspace.getConfiguration(undefined, getConfigurationResource());
+async function removeTransparencyPatchForTarget(target: TransparencyPatchTarget, resource?: vscode.Uri): Promise<void> {
+    const config = vscode.workspace.getConfiguration(undefined, resource ?? getConfigurationResource());
     const existingCustomizations = getTargetCustomizations(config, target);
     const state = getState(target);
     const backupKey = getBackupKey(target);
@@ -287,7 +289,15 @@ function getBackupKey(target: TransparencyPatchTarget): string {
 }
 
 function getConfigurationResource(): vscode.Uri | undefined {
-    return vscode.window.activeTextEditor?.document.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+    const activeDocument = vscode.window.activeTextEditor?.document.uri;
+    const activeFolder = activeDocument ? vscode.workspace.getWorkspaceFolder(activeDocument) : undefined;
+    if (activeFolder) {
+        return activeFolder.uri;
+    }
+    if (vscode.workspace.workspaceFolders?.length === 1) {
+        return vscode.workspace.workspaceFolders[0].uri;
+    }
+    return undefined;
 }
 
 function getTargetCustomizations(

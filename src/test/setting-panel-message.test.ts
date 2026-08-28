@@ -88,4 +88,12 @@ suite('Settings panel message protocol', () => {
         assert.match(source, /type:\s*'compatibilityStatus'/);
         assert.match(source, /update\('uiLanguage'/);
     });
+
+    test('pins one configuration resource for the panel lifetime', () => {
+        const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'panels', 'setting-panel.ts'), 'utf8');
+        assert.match(source, /private readonly resource: vscode\.Uri \| undefined/);
+        assert.match(source, /this\.resource = getSettingsResource\(\)/);
+        assert.match(source, /getPreferredTransparencyTarget\(this\.resource\)/);
+        assert.match(source, /getSettingsConfiguration\(this\.resource\)\.get<Record<string, number>>\('transparencyRules'\)/);
+    });
 });
