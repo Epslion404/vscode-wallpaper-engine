@@ -4,6 +4,15 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.8] - 2026-08-28
+
+### Fixed
+
+- 修复设置壁纸触发窗口重载时，`deactivate()` 错误清除注入、透明化和本地服务的问题。
+- 激活时恢复壁纸服务，并在 Workbench 注入缺失时自动修复后请求一次重载。
+- 重载后的成功提示现在要求注入标记、服务健康和壁纸入口全部验证通过。
+- 保留失败的待确认记录，便于用户重试或查看诊断日志。
+
 ## [0.0.7] - 2026-08-28
 
 ### Fixed
