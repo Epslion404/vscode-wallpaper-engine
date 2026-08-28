@@ -4,6 +4,14 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.7] - 2026-08-28
+
+### Fixed
+
+- Completed the restore workflow with lifecycle locking, cross-reload verification, and best-effort cleanup.
+- Improved restore progress and partial-failure feedback with retry and log actions.
+- Preserved user color customizations while restoring plugin-managed transparency in Global and Workspace scopes.
+
 ## [0.0.6] - 2026-08-28
 
 ### Fixed
