@@ -39,9 +39,9 @@
     - 壁纸内容与 Workbench 保持跨源隔离，不能访问宿主 DOM 或注入 Workbench 主脚本。
     - 切换壁纸时仅更新 iframe 的入口地址，不把用户脚本拼入 Workbench。
 
-### 2.3 设置面板 (Sidebar) 通信
+### 2.3 壁纸属性通信
 
-注入的脚本还包含一个简易的侧边栏（Sidebar），用于调整壁纸参数。
+Workbench 注入脚本和 Wallpaper Settings 可以将壁纸属性发送给沙箱 iframe；调试侧边栏默认关闭。
 
 1.  **获取配置**:
 
@@ -71,7 +71,13 @@
 
 `GET /config` 返回 `{ customCss, themeCompatibility }`。Extension Host 会在当前主题变化或配置变化时更新这两个字段，Workbench 注入脚本据此幂等刷新 CSS。
 
-设置 Webview 启动后发送 `{ command: "ready" }`，Host 回复 `setupState` 和 `{ type: "language", language, resolvedLanguage }`。用户切换语言时发送 `{ command: "setLanguage", language: "auto" | "zh-CN" | "en-US" }`，Host 严格校验并保存到用户级配置，再广播新的解析语言。
+设置 Webview 启动后发送 `{ command: "ready" }`，Host 回复以下状态：
+
+- `{ type: "setupState", state }`：设置壁纸的 idle/running/success/error 状态。
+- `{ type: "language", language, resolvedLanguage }`：用户配置值和 `auto` 解析后的实际语言。
+- `{ type: "compatibilityStatus", state }`：主题兼容模式、是否启用、命中原因和当前主题。
+
+用户切换语言时发送 `{ command: "setLanguage", language: "auto" | "zh-CN" | "en-US" }`，Host 严格校验并保存到用户级配置，再广播新的解析语言。未知语言值会被拒绝，不会写入配置。
 
 ## 3. 常见连接问题排查
 
@@ -101,7 +107,7 @@ sequenceDiagram
     Ext-->>WB: Wallpaper HTML
     WB->>IF: Render HTML
 
-    WB->>Ext: GET /project.json (Sidebar Init)
+    WB->>Ext: GET /project.json (Property UI Init)
     Ext-->>WB: JSON Config
 
     Note over WB, IF: User changes settings

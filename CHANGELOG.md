@@ -10,10 +10,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 - Wallpaper Settings 新增 `auto`、中文、English 三种界面语言，可即时切换并持久化。
 - 新增 `themeCompatibility` 配置，自动识别并兼容 C/C++ Theme 的现代 UI shell 背景覆盖。
+- 设置面板显示当前主题兼容状态、命中原因和主题名称。
 
 ### Fixed
 
 - 修复启用 `ms-vscode.cpptools-themes` 后壁纸在 Workbench 完成加载时被黑色背景覆盖的问题。
+- 统一设置过程常见状态、错误和固定控件的中英文反馈。
+
+### Documentation
+
+- 更新安装、重载确认、故障排查、还原卸载和沙箱隔离说明，使文档与 `0.0.11` 行为一致。
 
 ## [0.0.10] - 2026-08-28
 
