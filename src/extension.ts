@@ -14,7 +14,6 @@ import { WallpaperOutput } from './core/output';
 import { toUserErrorReason } from './core/user-message';
 import {
     PENDING_SETUP_CONFIRMATION_KEY,
-    PendingSetupConfirmation,
     runWallpaperSetup,
     shouldConfirmPendingSetup,
     WallpaperSetupError,
@@ -23,7 +22,7 @@ import {
 } from './core/wallpaper-setup';
 import { LifecycleState } from './core/lifecycle-state';
 import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
-import { needsWallpaperInjection } from './core/wallpaper-runtime';
+import { evaluateUninstallSupersession, isPendingSetupState, needsWallpaperInjection } from './core/wallpaper-runtime';
 
 // test
 import { openTestPage } from './playground/page';
@@ -95,7 +94,7 @@ export async function activate(context: vscode.ExtensionContext) {
     lifecycle = new LifecycleState(context.globalState.get<boolean>(DISABLED_KEY) ?? false);
     const initialConfig = getConfiguration();
     const pendingUninstallCandidate: unknown = context.globalState.get(PENDING_UNINSTALL_KEY);
-    const pendingUninstall = isPendingUninstall(pendingUninstallCandidate)
+    let pendingUninstall = isPendingUninstall(pendingUninstallCandidate)
         ? pendingUninstallCandidate
         : undefined;
     const invalidPendingUninstall = pendingUninstallCandidate !== undefined && !pendingUninstall;
@@ -104,6 +103,48 @@ export async function activate(context: vscode.ExtensionContext) {
         await context.globalState.update(DISABLED_KEY, true);
         lifecycle.setDisabled(true);
         console.warn('[Wallpaper] 丢弃格式无效的 pending uninstall 记录');
+    }
+    const pendingSetupCandidate: unknown = context.globalState.get(PENDING_SETUP_CONFIRMATION_KEY);
+    const pendingSetup = isPendingSetupState(pendingSetupCandidate)
+        ? pendingSetupCandidate
+        : undefined;
+    const invalidPendingSetup = pendingSetupCandidate !== undefined && !pendingSetup;
+    const persistedPath = context.globalState.get<string>('currentWallpaperPath');
+    const persistedEntry = context.globalState.get<string>('currentWallpaperEntry');
+    const supersession = pendingUninstall && pendingSetup
+        ? evaluateUninstallSupersession({
+            uninstallCreatedAt: pendingUninstall.createdAt,
+            setupCreatedAt: pendingSetup.createdAt,
+            setupWallpaperId: pendingSetup.wallpaperId,
+            currentWallpaperId: initialConfig.wallpaperId,
+            setupPath: pendingSetup.dirPath,
+            persistedPath,
+            setupEntry: pendingSetup.fileName,
+            persistedEntry
+        })
+        : undefined;
+    if (pendingUninstall && pendingSetup && supersession?.superseded) {
+        const supersededOperationId = pendingUninstall.operationId;
+        try {
+            await context.globalState.update(PENDING_UNINSTALL_KEY, undefined);
+            await context.globalState.update(DISABLED_KEY, false);
+            lifecycle.setDisabled(false);
+            pendingUninstall = undefined;
+            output.info(pendingSetup.operationId, `新设置事务已取代旧还原事务 ${supersededOperationId}`);
+        } catch (error) {
+            output.error(pendingSetup.operationId, '迁移陈旧还原事务失败', error);
+            try {
+                await context.globalState.update(PENDING_UNINSTALL_KEY, pendingUninstall);
+            } catch (restoreError) {
+                output.error(supersededOperationId, '恢复陈旧还原事务记录失败', restoreError);
+            }
+            await context.globalState.update(DISABLED_KEY, true);
+            lifecycle.setDisabled(true);
+        }
+    }
+    if (invalidPendingSetup) {
+        await context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined);
+        console.warn('[Wallpaper] 丢弃格式无效的 pending setup 记录');
     }
     let restoredServer = false;
     if (pendingUninstall) {
@@ -195,7 +236,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    const pendingConfirmation = context.globalState.get<PendingSetupConfirmation>(PENDING_SETUP_CONFIRMATION_KEY);
+    const pendingConfirmation = pendingSetup;
     if (pendingConfirmation && !lifecycle.disabled && !recoveryReloadRequested) {
         const shouldConfirm = shouldConfirmPendingSetup(pendingConfirmation, initialConfig.wallpaperId, Date.now());
         if (restoredServer && shouldConfirm && isPatched()) {
@@ -417,12 +458,6 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // 只有配置有效、确实开始设置时才解除卸载禁用闸门。
-        if (lifecycle.disabled) {
-            lifecycle.setDisabled(false);
-            await context.globalState.update(DISABLED_KEY, false);
-        }
-
         SettingsPanel.publishSetupState({
             status: 'running',
             stage: WallpaperSetupStage.ScanLibrary,
@@ -478,9 +513,31 @@ export async function activate(context: vscode.ExtensionContext) {
             startupCheckInterval: config.startupCheckInterval,
             location: selected.location
         };
+        const operationId = createOperationId();
+        try {
+            await context.globalState.update(PENDING_UNINSTALL_KEY, undefined);
+            if (lifecycle.disabled) {
+                lifecycle.setDisabled(false);
+                await context.globalState.update(DISABLED_KEY, false);
+            }
+            output.info(operationId, '用户已选择壁纸，清除旧还原事务并重新启用壁纸功能');
+        } catch (error) {
+            output.error(operationId, '无法重新启用壁纸状态', error);
+            SettingsPanel.publishSetupState({
+                status: 'error',
+                stage: WallpaperSetupStage.SaveConfiguration,
+                message: '无法清除旧还原事务，未启动壁纸设置'
+            });
+            const action = await vscode.window.showErrorMessage('无法重新启用壁纸状态，未启动壁纸设置。', '重试', '查看日志');
+            if (action === '重试') {
+                retryRequested = true;
+            } else if (action === '查看日志') {
+                output.show();
+            }
+            return;
+        }
         const oldWallpaperId = config.wallpaperId;
         const oldWallpaper = oldWallpaperId ? getWallpaperById(config.workshopPath, oldWallpaperId) : null;
-        const operationId = createOperationId();
         output.info(operationId, `开始设置壁纸「${setupInput.wallpaperTitle}」`);
         try {
             await vscode.window.withProgress({

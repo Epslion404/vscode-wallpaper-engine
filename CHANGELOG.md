@@ -4,6 +4,15 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.9] - 2026-08-28
+
+### Fixed
+
+- 修复重装后旧 `pendingUninstall` 优先级错误导致的新壁纸生效误报。
+- 仅允许时间更新且壁纸 ID、目录、入口一致的设置事务取代旧还原事务。
+- 用户真正选定壁纸后才清除旧还原状态；取消选择或前置失败不会误启用扩展。
+- 增加事务迁移、路径规范化和 pending setup 结构校验回归测试。
+
 ## [0.0.8] - 2026-08-28
 
 ### Fixed
