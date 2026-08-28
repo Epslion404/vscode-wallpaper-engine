@@ -30,6 +30,12 @@ suite('Injector security boundary', () => {
         assert.match(source, /addSourceToDirective\(restrictedContent, 'connect-src', serverOrigin\)/);
     });
 
+    test('Workbench restoration delegates user feedback to the extension host', () => {
+        assert.ok(!source.includes('showInformationMessage'));
+        assert.ok(!source.includes('showErrorMessage'));
+        assert.match(source, /throw new WorkbenchInjectionError\(/);
+    });
+
     test('successful write verification accepts the persisted marker', () => {
         assert.doesNotThrow(() => {
             ensureInjectionWritten(

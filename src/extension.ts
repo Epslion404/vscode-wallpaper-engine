@@ -448,9 +448,18 @@ export async function activate(context: vscode.ExtensionContext) {
             '卸载'
         );
         if (confirm === '卸载') {
-            await restoreWorkbench();
-            await removeTransparencyPatch();
-            await server?.stop();
+            const operationId = createOperationId();
+            try {
+                await restoreWorkbench();
+                await removeTransparencyPatch();
+                await server?.stop();
+                output.info(operationId, 'Workbench、透明化配置和壁纸服务已还原');
+                await vscode.window.showInformationMessage('Wallpaper Engine 已还原。');
+            } catch (error: unknown) {
+                output.error(operationId, '卸载还原失败', error);
+                const action = await vscode.window.showErrorMessage(`卸载还原失败：${toUserErrorReason(error)}`, '查看日志');
+                if (action === '查看日志') { output.show(); }
+            }
         }
     });
     context.subscriptions.push(uninstallCmd);
@@ -501,7 +510,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // This method is called when your extension is deactivated
 export async function deactivate() {
-    await restoreWorkbench();
-    await removeTransparencyPatch();
-    await server?.stop();
+    try {
+        await restoreWorkbench();
+        await removeTransparencyPatch();
+        await server?.stop();
+    } catch (error: unknown) {
+        console.error('[Wallpaper] Deactivation cleanup failed:', error);
+    }
 }

@@ -182,14 +182,12 @@ export async function restoreWorkbench() {
             }
         }
         
-        const action = await vscode.window.showInformationMessage('已还原。', '立即重启');
-        if (action === '立即重启') {
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-
     } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        vscode.window.showErrorMessage('还原失败: ' + message);
+        throw new WorkbenchInjectionError(
+            'reload',
+            `Workbench 还原失败: ${errorMessage(error)}`,
+            { cause: error },
+        );
     }
 }
 
