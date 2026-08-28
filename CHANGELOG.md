@@ -15,6 +15,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Fixed
 
 - 改进 Wallpaper Settings 规则表的筛选与回显体验，便于快速定位和调整透明化目标。
+- 修复更换壁纸后 Workbench 现代 UI shell 覆盖壁纸、启动瞬间可见随后变黑的问题。
+- 将 Workbench 注入协议升级到 `3`，自动迁移仍在使用旧版注入的窗口。
+- modern UI shell 透明化现作为基础注入规则，不再依赖 C/C++ Theme 自动识别结果。
 
 ### Documentation
 

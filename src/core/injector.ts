@@ -10,7 +10,7 @@ import { getThemeCompatibilityCss } from './theme-compatibility';
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
-const JS_INJECTION_VERSION = '2';
+const JS_INJECTION_VERSION = '3';
 const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
@@ -103,7 +103,12 @@ export function getWorkbenchTransparencyCss(): string {
         'div[role="application"] { background: transparent !important; }',
         '.monaco-workbench {',
         '  background: transparent !important;',
+        '  --modern-ui-shell-background: transparent !important;',
         '}',
+        '.monaco-workbench.floating-panels,',
+        '.monaco-workbench.floating-panels > .monaco-grid-view,',
+        '.monaco-workbench > .monaco-grid-view,',
+        '.monaco-grid-view { background: transparent !important; }',
         '.active.empty { background: transparent !important; }',
     ].join(' ');
 }

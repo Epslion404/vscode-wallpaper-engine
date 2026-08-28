@@ -18,7 +18,7 @@
 - **智能配色**: 自动适配当前主题颜色，支持自定义透明基底颜色，确保在任何主题下都能获得完美的视觉效果。
 - **自定义增强**: 支持注入自定义 CSS，微调编辑器外观。
 - **状态验证**: 设置过程包含媒体校验、服务健康检查、入口检查、Workbench 注入、透明化和重载后确认。
-- **C/C++ Theme 兼容**: 自动识别 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题，避免现代 UI shell 在加载完成后覆盖壁纸。
+- **C/C++ Theme 兼容**: 基础注入始终覆盖现代 UI shell 背景，并可自动识别 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题执行额外兼容处理。
 - **中英双语设置面板**: Wallpaper Settings 支持 `auto`、中文和 English，可运行时切换并持久化。
 - **隔离加载**: Web 壁纸运行在 `sandbox="allow-scripts"` 的 iframe 中，不能访问 Workbench DOM。
 
@@ -141,7 +141,7 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 
 ### 壁纸只在启动瞬间出现，随后变黑？
 
-这通常是主题扩展在 Workbench 完成加载后重新写入了不透明背景。已知冲突来源包括 `ms-vscode.cpptools-themes`（C/C++ Theme）。请保持 `themeCompatibility=auto`，必要时改为 `on` 并重载窗口；若仍然冲突，可暂时禁用该主题扩展验证。确认冲突后不需要修改壁纸文件。
+这通常是主题扩展或旧版注入在 Workbench 完成加载后重新写入了不透明背景。当前版本会始终覆盖 modern UI shell，并将注入协议升级到 `3`；升级后请重新执行一次“设置壁纸”或重载窗口。若已安装 `ms-vscode.cpptools-themes`，请保持 `themeCompatibility=auto`，必要时改为 `on`。确认冲突后不需要修改壁纸文件。
 
 ## 🛠️ 开发与发布
 

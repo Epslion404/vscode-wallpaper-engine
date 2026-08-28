@@ -11,7 +11,7 @@
 3. **本地壁纸服务器**：由 Extension Host 启动，默认只监听 `127.0.0.1:23333`，提供壁纸入口、项目配置和健康检查接口。
 4. **壁纸 iframe**：使用 `sandbox="allow-scripts"` 加载 Web 壁纸入口。未授予 `allow-same-origin`，因此壁纸脚本不能读取或修改 Workbench DOM，也不能直接访问扩展宿主。
 
-Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src` 和 `connect-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
+Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src` 和 `connect-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入脚本始终覆盖 modern UI shell 的背景变量和 `.monaco-grid-view`，主题兼容模式只负责额外的 C/C++ Theme 适配。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
 
 ## 2. 初始化与壁纸加载
 

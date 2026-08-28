@@ -38,6 +38,8 @@ suite('Injector security boundary', () => {
         assert.match(css, /\.monaco-workbench/);
         assert.match(css, /div\[role="application"\]/);
         assert.match(css, /background:\s*transparent\s*!important/);
+        assert.match(css, /--modern-ui-shell-background:\s*transparent\s*!important/);
+        assert.match(css, /\.monaco-grid-view/);
     });
 
     test('Workbench restoration delegates user feedback to the extension host', () => {
@@ -58,11 +60,11 @@ suite('Injector security boundary', () => {
 
     test('outdated Workbench injections are not treated as current', () => {
         assert.strictEqual(
-            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:1] */'),
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:2] */'),
             false,
         );
         assert.strictEqual(
-            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:2] */'),
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:3] */'),
             true,
         );
     });
