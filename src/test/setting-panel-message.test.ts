@@ -95,5 +95,6 @@ suite('Settings panel message protocol', () => {
         assert.match(source, /this\.resource = getSettingsResource\(\)/);
         assert.match(source, /getPreferredTransparencyTarget\(this\.resource\)/);
         assert.match(source, /getSettingsConfiguration\(this\.resource\)\.get<Record<string, number>>\('transparencyRules'\)/);
+        assert.match(source, /transparencyDescriptions/);
     });
 });

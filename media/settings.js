@@ -93,6 +93,7 @@ function applyLanguage(language, resolvedLanguage) {
   const infoLabels = document.querySelectorAll("#info-name, #info-type, #info-entry, #info-path");
   ["name", "type", "entry", "path"].forEach((key, index) => { const el = infoLabels[index]?.parentElement?.querySelector("strong"); if (el) el.innerText = `${t(key)}:`; });
   renderGeneralSettings();
+  renderTransparencyRules();
   if (window.lastWallpaperProject) renderUI(window.lastWallpaperProject);
   if (window.lastCompatibilityState) renderCompatibilityStatus(window.lastCompatibilityState);
 }
@@ -506,6 +507,7 @@ function renderTransparencyRules() {
   const panel = document.getElementById("transparencyPanel");
   const keys = window.transparencyKeys || [];
   const rules = window.transparencyRules || {};
+  const descriptions = window.transparencyDescriptions || {};
 
   panel.innerHTML = "";
 
@@ -527,7 +529,9 @@ function renderTransparencyRules() {
 
     // Label
     const label = document.createElement("span");
-    label.innerText = key;
+    const description = descriptions[key];
+    const localizedLabel = currentLanguage === "zh-CN" ? description?.zhCN : description?.enUS;
+    label.innerText = `${localizedLabel || key}${currentLanguage === "zh-CN" ? "（" : " ("}${key}${currentLanguage === "zh-CN" ? "）" : ")"}`;
     label.style.flex = "1";
     label.style.fontSize = "0.9em";
     label.title = key; // Tooltip

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WallpaperServer } from '../core/server';
-import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch, getPreferredConfigurationTarget, getPreferredTransparencyTarget } from '../core/config-patcher';
+import { TRANSPARENT_COLOR_KEYS, TRANSPARENCY_COLOR_RULES, applyTransparencyPatch, getPreferredConfigurationTarget, getPreferredTransparencyTarget } from '../core/config-patcher';
 import { WallpaperSetupViewState } from '../core/wallpaper-setup';
 import { toUserErrorReason } from '../core/user-message';
 import { isUiLanguage, resolveUiLanguage, UiLanguage } from './localization';
@@ -370,6 +370,7 @@ export class SettingsPanel {
             .replace(/{{serverPort}}/g, port.toString())
             .replace(/{{customCss}}/g, escapeHtml(customCss))
             .replace(/{{transparencyKeys}}/g, JSON.stringify(TRANSPARENT_COLOR_KEYS))
+            .replace(/{{transparencyDescriptions}}/g, JSON.stringify(Object.fromEntries(TRANSPARENCY_COLOR_RULES.map(rule => [rule.key, { zhCN: rule.labelZh, enUS: rule.labelEn }]))))
             .replace(/{{transparencyRules}}/g, JSON.stringify(transparencyRules))
             .replace(/{{transparencyEnabled}}/g, JSON.stringify(transparencyEnabled))
             .replace(/{{transparencyBaseColor}}/g, escapeHtml(transparencyBaseColor))
