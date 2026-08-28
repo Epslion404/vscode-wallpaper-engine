@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import { parseSettingsPanelMessage } from '../panels/setting-panel';
 
 suite('Settings panel message protocol', () => {
@@ -78,5 +80,12 @@ suite('Settings panel message protocol', () => {
         for (const message of malformedMessages) {
             assert.strictEqual(parseSettingsPanelMessage(message), undefined);
         }
+    });
+
+    test('publishes language and theme compatibility state to the webview', () => {
+        const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'panels', 'setting-panel.ts'), 'utf8');
+        assert.match(source, /type:\s*'language'/);
+        assert.match(source, /type:\s*'compatibilityStatus'/);
+        assert.match(source, /update\('uiLanguage'/);
     });
 });

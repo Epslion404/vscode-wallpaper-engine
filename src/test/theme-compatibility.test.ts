@@ -11,17 +11,17 @@ suite('Theme compatibility', () => {
     const cppThemes: ThemeDescriptor[] = [
         { extensionId: 'ms-vscode.cpptools-themes', id: 'Visual Studio Dark - C++', label: 'Dark (Visual Studio - C/C++)' },
         { extensionId: 'ms-vscode.cpptools-themes', id: 'Visual Studio Light - C++', label: 'Light (Visual Studio - C/C++)' },
+        { extensionId: 'ms-vscode.cpptools-themes', id: 'Visual Studio 2017 Dark - C++', label: '2017 Dark (Visual Studio - C/C++)' },
+        { extensionId: 'ms-vscode.cpptools-themes', id: 'Visual Studio 2017 Light - C++', label: '2017 Light (Visual Studio - C/C++)' },
     ];
 
     test('detects C/C++ Theme contributions by extension and label', () => {
-        assert.strictEqual(
-            shouldApplyThemeCompatibility({ colorTheme: 'Dark (Visual Studio - C/C++)', descriptors: cppThemes, mode: 'auto' }).enabled,
-            true,
-        );
-        assert.strictEqual(
-            shouldApplyThemeCompatibility({ colorTheme: 'Visual Studio Light - C++', descriptors: cppThemes, mode: 'auto' }).enabled,
-            true,
-        );
+        for (const theme of cppThemes) {
+            assert.strictEqual(
+                shouldApplyThemeCompatibility({ colorTheme: theme.label ?? theme.id ?? '', descriptors: cppThemes, mode: 'auto' }).enabled,
+                true,
+            );
+        }
     });
 
     test('does not classify unrelated themes as C/C++ Theme', () => {

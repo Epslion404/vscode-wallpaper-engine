@@ -108,6 +108,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const syncServerCssConfig = (config: ReturnType<typeof getConfiguration> = getConfiguration()) => {
         const decision = getThemeCompatibility(config);
         server?.updateCssConfig({ customCss: config.customCss, themeCompatibility: decision.enabled });
+        SettingsPanel.publishCompatibilityStatus({ mode: config.themeCompatibility, ...decision });
         output.info('theme-compatibility', `主题兼容模式=${config.themeCompatibility}，当前主题=${decision.theme ?? 'unknown'}，应用=${decision.enabled}（${decision.reason}）`);
         return decision;
     };

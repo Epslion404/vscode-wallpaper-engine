@@ -6,6 +6,7 @@ import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch } from '../core/config-p
 import { WallpaperSetupViewState } from '../core/wallpaper-setup';
 import { toUserErrorReason } from '../core/user-message';
 import { isUiLanguage, resolveUiLanguage, UiLanguage } from './localization';
+import { ThemeCompatibilityMode, ThemeCompatibilityDecision } from '../core/theme-compatibility';
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -25,6 +26,10 @@ export type SettingsPanelMessage =
     | { command: 'toggleTransparency'; enabled: boolean }
     | { command: 'updateTransparencyBaseColor'; color: string }
     | { command: 'setLanguage'; language: UiLanguage };
+
+export interface ThemeCompatibilityViewState extends ThemeCompatibilityDecision {
+    mode: ThemeCompatibilityMode;
+}
 
 type CommandWithoutPayload = Extract<SettingsPanelMessage, { command:
     | 'ready'
@@ -121,6 +126,9 @@ export function parseSettingsPanelMessage(message: unknown): SettingsPanelMessag
 export class SettingsPanel {
     public static currentPanel: SettingsPanel | undefined;
     private static setupState: WallpaperSetupViewState = { status: 'idle', message: '等待操作' };
+    private static compatibilityState: ThemeCompatibilityViewState = {
+        mode: 'auto', enabled: false, reason: 'not-detected', theme: ''
+    };
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
 
@@ -162,6 +170,11 @@ export class SettingsPanel {
         void SettingsPanel.currentPanel?._panel.webview.postMessage({ type: 'language', language, resolvedLanguage: resolved });
     }
 
+    public static publishCompatibilityStatus(state: ThemeCompatibilityViewState): void {
+        SettingsPanel.compatibilityState = state;
+        void SettingsPanel.currentPanel?._panel.webview.postMessage({ type: 'compatibilityStatus', state });
+    }
+
     public dispose() {
         SettingsPanel.currentPanel = undefined;
         this._panel.dispose();
@@ -186,6 +199,7 @@ export class SettingsPanel {
                     });
                 } else if (message.command === 'ready') {
                     await webview.postMessage({ type: 'setupState', state: SettingsPanel.setupState });
+                    await webview.postMessage({ type: 'compatibilityStatus', state: SettingsPanel.compatibilityState });
                     const configured = vscode.workspace.getConfiguration('vscode-wallpaper-engine').get<unknown>('uiLanguage');
                     const language = isUiLanguage(configured) ? configured : 'auto';
                     await webview.postMessage({ type: 'language', language, resolvedLanguage: resolveUiLanguage(language, vscode.env.language) });
@@ -343,7 +357,8 @@ export class SettingsPanel {
             .replace(/{{transparencyRules}}/g, JSON.stringify(transparencyRules))
             .replace(/{{transparencyEnabled}}/g, JSON.stringify(transparencyEnabled))
             .replace(/{{transparencyBaseColor}}/g, escapeHtml(transparencyBaseColor))
-            .replace(/{{uiLanguage}}/g, JSON.stringify(uiLanguage));
+            .replace(/{{uiLanguage}}/g, JSON.stringify(uiLanguage))
+            .replace(/{{themeCompatibilityState}}/g, JSON.stringify(SettingsPanel.compatibilityState));
 
         return htmlContent;
     }

@@ -25,6 +25,10 @@
         </select>
     </div>
 
+    <div id="theme-compatibility-status" class="setup-status" data-status="idle" role="status" aria-live="polite">
+        Theme compatibility: checking…
+    </div>
+
     <div class="section-header">Server Status</div>
     <div class="control-group" style="padding: 10px; background: #252526; margin-bottom: 10px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
@@ -99,6 +103,7 @@
         window.transparencyRules = {{transparencyRules}};
         window.transparencyEnabled = {{transparencyEnabled}};
         window.uiLanguage = {{uiLanguage}};
+        window.themeCompatibilityState = {{themeCompatibilityState}};
     </script>
     <script id="settings-script" src="{{scriptUri}}" data-server-root="http://127.0.0.1:{{serverPort}}"></script>
 </body>

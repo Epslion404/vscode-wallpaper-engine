@@ -21,7 +21,9 @@ const I18N = {
     transparencyHint: "切换元素以使其透明。调整不透明度（0 = 完全透明，1 = 完全不透明）。",
     applyRules: "应用透明化规则", generalSimulation: "通用模拟", wallpaperProperties: "壁纸属性",
     waiting: "等待操作", loading: "加载中…", checking: "检查中…", failed: "失败", connected: "已连接",
-    stopped: "已停止", unknown: "未知", error: "错误", exception: "异常", invalidColor: "颜色格式无效。请输入十六进制颜色（例如 #1e1e1e），或留空使用自动。"
+    stopped: "已停止", unknown: "未知", error: "错误", exception: "异常", invalidColor: "颜色格式无效。请输入十六进制颜色（例如 #1e1e1e），或留空使用自动。",
+    compatibility: "主题兼容", compatibilityDetected: "已检测到 C/C++ Theme，兼容层已启用", compatibilityNotDetected: "未检测到 C/C++ Theme 主题",
+    compatibilityForced: "已强制启用主题兼容层", compatibilityDisabled: "主题兼容层已关闭", currentTheme: "当前主题"
   },
   "en-US": {
     language: "Language", auto: "Auto", chinese: "中文", english: "English",
@@ -34,7 +36,9 @@ const I18N = {
     transparencyHint: "Toggle elements to make them transparent. Adjust opacity (0 = Invisible, 1 = Opaque).",
     applyRules: "Apply Transparency Rules", generalSimulation: "General Simulation", wallpaperProperties: "Wallpaper Properties",
     waiting: "Waiting for operation", loading: "Loading…", checking: "Checking…", failed: "Failed", connected: "Connected",
-    stopped: "Stopped", unknown: "Unknown", error: "Error", exception: "Exception", invalidColor: "Invalid color format. Use Hex (e.g. #1e1e1e) or leave empty for Auto."
+    stopped: "Stopped", unknown: "Unknown", error: "Error", exception: "Exception", invalidColor: "Invalid color format. Use Hex (e.g. #1e1e1e) or leave empty for Auto.",
+    compatibility: "Theme compatibility", compatibilityDetected: "C/C++ Theme detected; compatibility layer enabled", compatibilityNotDetected: "No C/C++ Theme detected",
+    compatibilityForced: "Theme compatibility layer forced on", compatibilityDisabled: "Theme compatibility layer is off", currentTheme: "Current theme"
   }
 };
 
@@ -49,9 +53,19 @@ function localizeStatusMessage(message) {
     "正在检查扩展配置…": "Checking extension configuration…", "正在扫描壁纸库…": "Scanning wallpaper library…", "正在等待选择壁纸…": "Waiting for wallpaper selection…",
     "正在校验壁纸媒体…": "Validating wallpaper media…", "正在启动本地服务…": "Starting local server…", "正在检查服务状态…": "Checking server status…",
     "正在验证壁纸入口…": "Verifying wallpaper entry…", "正在应用界面透明化…": "Applying UI transparency…", "正在写入 Workbench…": "Writing Workbench patch…",
-    "正在保存壁纸配置…": "Saving wallpaper configuration…", "正在重新加载窗口…": "Reloading window…"
+    "正在保存壁纸配置…": "Saving wallpaper configuration…", "正在重新加载窗口…": "Reloading window…",
+    "窗口重载后的生效验证失败": "Post-reload wallpaper verification failed",
+    "无法清除旧还原事务，未启动壁纸设置": "Could not clear the previous restore transaction; wallpaper setup did not start",
+    "请先配置正确的 Wallpaper Engine 创意工坊目录。": "Configure a valid Wallpaper Engine workshop directory first."
   };
-  return exact[message] || message;
+  if (exact[message]) return exact[message];
+  const active = message.match(/^壁纸「(.+)」已生效$/);
+  if (active) return `Wallpaper "${active[1]}" is active`;
+  const reloadFailure = message.match(/^窗口重载后未确认壁纸生效（(.+)），请查看日志并重试$/);
+  if (reloadFailure) return `Wallpaper was not confirmed after reload (${reloadFailure[1]}). Check the log and retry.`;
+  const setupFailure = message.match(/^设置壁纸失败（(.+)）：(.+)$/);
+  if (setupFailure) return `Wallpaper setup failed at ${setupFailure[1]}: ${setupFailure[2]}`;
+  return message;
 }
 
 function applyLanguage(language, resolvedLanguage) {
@@ -80,6 +94,17 @@ function applyLanguage(language, resolvedLanguage) {
   ["name", "type", "entry", "path"].forEach((key, index) => { const el = infoLabels[index]?.parentElement?.querySelector("strong"); if (el) el.innerText = `${t(key)}:`; });
   renderGeneralSettings();
   if (window.lastWallpaperProject) renderUI(window.lastWallpaperProject);
+  if (window.lastCompatibilityState) renderCompatibilityStatus(window.lastCompatibilityState);
+}
+
+function renderCompatibilityStatus(state) {
+  window.lastCompatibilityState = state;
+  const el = document.getElementById("theme-compatibility-status");
+  if (!el) return;
+  const reasonKey = state.enabled ? (state.reason === "forced" ? "compatibilityForced" : "compatibilityDetected") : (state.reason === "disabled" ? "compatibilityDisabled" : "compatibilityNotDetected");
+  const theme = state.theme || t("unknown");
+  el.innerText = `${t("compatibility")}: ${t(reasonKey)} · ${t("currentTheme")}: ${theme}`;
+  el.dataset.status = state.enabled ? "success" : "idle";
 }
 
 function renderSetupState(state) {
@@ -99,6 +124,9 @@ window.addEventListener("message", (event) => {
   if (event.data && event.data.type === "language") {
     applyLanguage(event.data.language, event.data.resolvedLanguage);
     renderSetupState({ ...window.lastSetupState, message: window.lastSetupState?.message || t("waiting") });
+  }
+  if (event.data && event.data.type === "compatibilityStatus") {
+    renderCompatibilityStatus(event.data.state);
   }
 });
 
@@ -573,6 +601,7 @@ document
   });
 
 console.log("Settings Webview Loaded");
+if (window.themeCompatibilityState) renderCompatibilityStatus(window.themeCompatibilityState);
 renderGeneralSettings(); // Render general settings immediately
 fetch(SERVER_ROOT + "/project.json")
   .then((res) => res.json())
