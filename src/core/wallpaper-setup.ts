@@ -1,9 +1,13 @@
-import { WallpaperType } from './types';
+import { PlayableWallpaperType } from './types';
 
 export enum WallpaperSetupStage {
     ValidateConfiguration = 'validateConfiguration',
     ScanLibrary = 'scanLibrary',
     SelectWallpaper = 'selectWallpaper',
+    PrepareScene = 'prepareScene',
+    LaunchSceneRenderer = 'launchSceneRenderer',
+    RecordScene = 'recordScene',
+    ValidateSceneCache = 'validateSceneCache',
     ValidateMedia = 'validateMedia',
     StartServer = 'startServer',
     VerifyHealth = 'verifyHealth',
@@ -22,7 +26,7 @@ export interface WallpaperSetupInput {
     dirPath: string;
     filePath: string;
     fileName: string;
-    type: WallpaperType;
+    type: PlayableWallpaperType;
     port: number;
     opacity: number;
     resizeDelay: number;

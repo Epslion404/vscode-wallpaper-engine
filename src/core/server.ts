@@ -16,6 +16,7 @@ import {
     WallpaperServerStartupTimeoutError
 } from './server-preflight';
 import { PENDING_SETUP_CONFIRMATION_KEY } from './wallpaper-setup';
+import { CURRENT_PLAYBACK_STATE_KEY } from './playback-state';
 
 export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupTimeoutError } from './server-preflight';
 
@@ -26,6 +27,7 @@ const PERSISTED_WALLPAPER_STATE_KEYS = [
     'currentWallpaperPath',
     'currentWallpaperEntry',
     'currentWallpaperLocation',
+    CURRENT_PLAYBACK_STATE_KEY,
     PENDING_SETUP_CONFIRMATION_KEY
 ] as const;
 

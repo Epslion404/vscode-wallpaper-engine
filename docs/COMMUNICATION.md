@@ -4,23 +4,26 @@
 
 ## 1. 组件与安全边界
 
-系统由四个部分组成：
+系统由五个部分组成：
 
 1. **Extension Host**：运行扩展宿主中的 Node.js 代码，负责生命周期、配置、透明化规则、本地服务器和 Workbench 文件修改。
 2. **Workbench 注入脚本**：运行在 VS Code 主窗口，用于创建壁纸容器、同步透明化 CSS 和向壁纸 iframe 发送运行时消息。
 3. **本地壁纸服务器**：由 Extension Host 启动，默认只监听 `127.0.0.1:23333`，提供壁纸入口、项目配置和健康检查接口。
 4. **壁纸 iframe**：使用 `sandbox="allow-scripts"` 加载 Web 壁纸入口。未授予 `allow-same-origin`，因此壁纸脚本不能读取或修改 Workbench DOM，也不能直接访问扩展宿主。
+5. **Scene 捕获 helper**：仅在录制原生 Scene 时启动，使用 Windows Graphics Capture 捕获指定的 Wallpaper Engine 命名窗口；完成后由 FFmpeg 转为 VP9/WebM，helper 不接触 Workbench 或本地 HTTP 服务。
 
 Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src` 和 `connect-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入脚本通过基础 CSS 和节流的 DOM 观察持续覆盖 modern UI shell 的背景变量及 `.monaco-grid-view`，主题兼容模式只负责额外的 C/C++ Theme 适配。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
 
 ## 2. 初始化与壁纸加载
 
 1. 扩展激活后读取配置，并按需要启动本地服务器。
-2. 设置壁纸命令扫描创意工坊目录中的 `project.json`。当前支持 `video`、`image` 和 `web`，原生 `scene` 类型会被诊断为不支持，不会作为可加载壁纸返回。
-3. 服务器启动后，扩展依次验证媒体、服务健康状态和 `/api/get-entry` 入口。
-4. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 `workbench.desktop.main.js`，最后请求窗口重载。
-5. 注入脚本创建 `#vscode-wallpaper-container` 和壁纸 iframe。Web 壁纸先显示加载状态，iframe `load` 事件触发后再显示内容。
-6. 视频和图片壁纸通过 VS Code 资源 URL 加载；Web 壁纸通过本地服务的 `/api/get-entry` 加载。
+2. 设置壁纸命令扫描创意工坊目录中的 `project.json`。`video`、`image`、`web` 和 `scene` 均进入候选列表，标题和工坊 ID 都可搜索。
+3. 选择 Scene 后，扩展检查 `globalStorageUri/scene-cache`：已有有效缓存可直接复用或重新录制；无缓存时输入 1–300 秒，留空默认 30 秒。
+4. 录制时 Wallpaper Engine 通过 `openWallpaper` 在唯一命名窗口中渲染；原生 helper 捕获该窗口，FFmpeg 转为静音 VP9/WebM 并执行视频流、时长、尺寸和黑帧验证。成功后原子提交缓存，失败或取消保留旧缓存。
+5. Scene 缓存随后按普通 Video 进入既有设置事务。服务器依次验证媒体、服务健康状态和 `/api/get-entry` 入口。
+6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 `workbench.desktop.main.js`，最后请求窗口重载。
+7. 注入脚本创建 `#vscode-wallpaper-container` 和壁纸 iframe。Web 壁纸先显示加载状态，iframe `load` 事件触发后再显示内容。
+8. 视频、Scene 缓存和图片壁纸通过 VS Code 资源 URL 加载；Web 壁纸通过本地服务的 `/api/get-entry` 加载。
 
 ## 3. 本地 HTTP 接口
 
@@ -70,6 +73,7 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 
 - 修改壁纸或服务器端口时，扩展会保存待确认事务，并在注入完成后请求 `workbench.action.reloadWindow`。
 - 重载后的激活流程会验证注入标记、服务健康和壁纸入口；任一项失败都会保留错误状态，便于重试或查看 `Wallpaper Engine` Output 日志。
+- Scene 会持久化实际缓存视频的根目录、入口和 `Video` 播放类型；重载恢复、配置重应用和失败回滚不会把原始 `scene.pkg` 直接送入 Workbench。
 - 执行“还原壁纸修改”时，扩展会停止服务、移除 Workbench 注入、恢复 CSP、删除插件托管的透明化备份和持久化状态，再通过重载后的验证确认清理完成。
 - VS Code 更新可能覆盖 Workbench 文件。此时需要重新执行“设置壁纸”；若不再使用扩展，应先执行还原命令并等待验证通过，再卸载扩展。
 
@@ -85,10 +89,19 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 ```mermaid
 sequenceDiagram
     participant Ext as Extension Host
+    participant WE as Wallpaper Engine Scene Window
+    participant Cap as WGC Capture Helper
     participant WB as Workbench 注入脚本
     participant S as 127.0.0.1 壁纸服务
     participant IF as sandbox iframe
 
+    opt 选择 Scene 且需要录制
+        Ext->>WE: openWallpaper(playInWindow)
+        Ext->>Cap: 按唯一窗口名录制
+        Cap-->>Ext: 临时视频
+        Ext->>Ext: FFmpeg 转码、验证并提交缓存
+        Ext->>WE: closeWallpaper(location)
+    end
     Ext->>S: 启动并监听端口
     Ext->>WB: 注入引导脚本与受限 CSP 来源
     WB->>S: GET /ping

@@ -13,6 +13,8 @@ export interface AppConfig {
     customCss: string;
     themeCompatibility: ThemeCompatibilityMode;
     uiLanguage: UiLanguage;
+    wallpaperEnginePath: string;
+    ffmpegPath: string;
 }
 
 export function getConfiguration(): AppConfig {
@@ -30,8 +32,22 @@ export function getConfiguration(): AppConfig {
         : 'auto';
     const configuredUiLanguage = config.get<unknown>('uiLanguage');
     const uiLanguage = isUiLanguage(configuredUiLanguage) ? configuredUiLanguage : 'auto';
+    const wallpaperEnginePath = config.get<string>('wallpaperEnginePath') || '';
+    const ffmpegPath = config.get<string>('ffmpegPath') || '';
 
-    return { workshopPath, opacity, serverPort, wallpaperId, resizeDelay, startupCheckInterval, customCss, themeCompatibility, uiLanguage };
+    return {
+        workshopPath,
+        opacity,
+        serverPort,
+        wallpaperId,
+        resizeDelay,
+        startupCheckInterval,
+        customCss,
+        themeCompatibility,
+        uiLanguage,
+        wallpaperEnginePath,
+        ffmpegPath
+    };
 }
 
 export function getConfigValidationError(config: AppConfig): string | undefined {

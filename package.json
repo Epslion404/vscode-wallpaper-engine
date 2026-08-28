@@ -49,6 +49,16 @@
           "default": "",
           "description": "Wallpaper Engine 创意工坊目录路径 (例如: D:/Steam/steamapps/workshop/content/431960)"
         },
+        "vscode-wallpaper-engine.wallpaperEnginePath": {
+          "type": "string",
+          "default": "",
+          "description": "Wallpaper Engine 可执行文件路径，留空时自动检测 / Wallpaper Engine executable path; auto-detected when empty"
+        },
+        "vscode-wallpaper-engine.ffmpegPath": {
+          "type": "string",
+          "default": "",
+          "description": "FFmpeg 可执行文件路径，留空时自动检测 / FFmpeg executable path; auto-detected when empty"
+        },
         "vscode-wallpaper-engine.backgroundOpacity": {
           "type": "number",
           "default": 0.1,
@@ -134,6 +144,7 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
+    "build:scene-helper": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-scene-capture-helper.ps1",
     "test": "vscode-test",
     "output": "npm run vsce-package && node ./scripts/move-vsix.js",
     "vsce-package": "npx @vscode/vsce package"

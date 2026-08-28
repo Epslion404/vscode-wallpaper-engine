@@ -192,6 +192,7 @@ suite('WallpaperServer lifecycle and preflight', () => {
             ['currentWallpaperPath', root],
             ['currentWallpaperEntry', 'index.html'],
             ['currentWallpaperLocation', root],
+            ['currentWallpaperPlayback', { wallpaperId: 'wallpaper' }],
             ['pendingSetupConfirmation', { wallpaperId: 'wallpaper' }]
         ]);
         const context = {
@@ -207,7 +208,7 @@ suite('WallpaperServer lifecycle and preflight', () => {
 
         await server.clearPersistedWallpaperState();
 
-        for (const key of ['currentWallpaperPath', 'currentWallpaperEntry', 'currentWallpaperLocation', 'pendingSetupConfirmation']) {
+        for (const key of ['currentWallpaperPath', 'currentWallpaperEntry', 'currentWallpaperLocation', 'currentWallpaperPlayback', 'pendingSetupConfirmation']) {
             assert.strictEqual(values.get(key), undefined, `expected ${key} to be cleared`);
         }
     });
@@ -266,6 +267,7 @@ suite('WallpaperServer lifecycle and preflight', () => {
             'currentWallpaperPath',
             'currentWallpaperEntry',
             'currentWallpaperLocation',
+            'currentWallpaperPlayback',
             'pendingSetupConfirmation'
         ]);
     });

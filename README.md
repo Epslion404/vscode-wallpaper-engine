@@ -13,7 +13,7 @@
 
 ## ✨ 主要功能
 
-- **Wallpaper Engine 支持**: 加载 Steam 创意工坊中的视频、图片和 Web 类型壁纸；原生 Scene 类型暂不支持。
+- **Wallpaper Engine 支持**: 加载 Steam 创意工坊中的视频、图片和 Web 壁纸；原生 Scene 可自动录制为本地视频缓存后播放。
 - **深度透明化**: 不仅仅是简单的透明度，支持对编辑器、侧边栏、面板、终端等 UI 元素进行**精细化的透明度控制**。
 - **智能配色**: 自动适配当前主题颜色，支持自定义透明基底颜色，确保在任何主题下都能获得完美的视觉效果。
 - **自定义增强**: 支持注入自定义 CSS，微调编辑器外观。
@@ -27,7 +27,8 @@
 ### 前置要求
 
 1.  已安装 **Wallpaper Engine** (Steam 版本)。
-2.  **权限说明**: 首次安装或更新注入时，插件会请求管理员权限 (Sudo) 以修改 VS Code 核心文件，请允许。
+2.  使用 Scene 壁纸时，需要可用的 **FFmpeg**，且构建包含 `gdigrab` 和 `libvpx-vp9`；扩展会优先从 PATH 和常见目录自动检测。
+3.  **权限说明**: 首次安装或更新注入时，插件会请求管理员权限 (Sudo) 以修改 VS Code 核心文件，请允许。
 
 ### 安装步骤
 
@@ -41,6 +42,7 @@
     - 按 `F1` 或 `Ctrl+Shift+P` 打开命令面板。
     - 输入并执行 `Set Wallpaper: 设置壁纸`。
     - 从列表中选择一个壁纸。
+    - 选择 Scene 时输入录制秒数；留空默认 30 秒，有效范围为 1–300 秒。已有缓存可直接使用或重新录制。
 4.  **等待窗口重载与确认**:
     - 插件完成校验和注入后会请求重新加载窗口。
     - 重载后只有在注入标记、壁纸服务和入口文件均验证通过时，才会提示壁纸已生效。
@@ -57,6 +59,8 @@
 - `vscode-wallpaper-engine.startupCheckInterval`: Workbench 启动时轮询本地服务的间隔。
 - `vscode-wallpaper-engine.themeCompatibility`: C/C++ Theme 兼容模式：`auto`（默认，仅检测到冲突主题时启用）、`on`、`off`。
 - `vscode-wallpaper-engine.uiLanguage`: Wallpaper Settings 语言：`auto`（跟随 VS Code 语言）、`zh-CN` 或 `en-US`。
+- `vscode-wallpaper-engine.wallpaperEnginePath`: Wallpaper Engine 可执行文件路径；留空时自动检测。
+- `vscode-wallpaper-engine.ffmpegPath`: FFmpeg 可执行文件路径；留空时自动检测。
 
 ### 透明化设置 (Transparency)
 
@@ -104,6 +108,14 @@
 
 如果壁纸只在 VS Code 启动瞬间出现、随后变成黑色，通常是 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题重新设置了现代 UI shell 背景。插件会在 `themeCompatibility=auto` 下自动注入针对性透明规则，不会卸载或禁用该主题扩展。仍有问题时可在设置中手动将 `themeCompatibility` 设为 `on`，并执行一次 `Developer: Reload Window`。
 
+### Scene 自动录制缓存
+
+- Scene 不能直接在浏览器中播放。扩展会让 Wallpaper Engine 在独立命名窗口中渲染，再通过 Windows Graphics Capture 录制临时视频，并由 FFmpeg 转成静音 VP9/WebM 缓存。
+- 缓存保存在扩展的 `globalStorageUri/scene-cache` 中，不修改 Steam 工坊源文件，也不会写入 VSIX。
+- 首次选择 Scene 时输入录制时长；留空采用 30 秒。再次选择同一 Scene 时可复用缓存或重新录制。
+- 录制支持取消；失败或取消会清理专用窗口和临时文件，并保留上一次有效缓存与当前壁纸。
+- Scene 源文件、时长、分辨率或编码参数变化后，旧缓存会自动失效。
+
 ### 还原修改并卸载
 
 **⚠️ 重要**: 本插件通过注入 JS/HTML 代码并修改 CSP (内容安全策略) 到 VS Code 核心文件中来实现功能。直接移除插件**不会**自动撤销这些修改。
@@ -127,6 +139,14 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 2.  下载对应 Electron 版本的完整版 `ffmpeg.dll`。
 3.  替换 VS Code 安装目录下的 `ffmpeg.dll` 文件。
 
+### Scene 无法录制？
+
+1. 在 `Wallpaper Engine` Output 中确认 Wallpaper Engine、FFmpeg 和原生捕获 helper 均已找到。
+2. FFmpeg 必须支持 `libvpx-vp9`；可执行 `ffmpeg -encoders` 检查。
+3. 若自动检测失败，在设置中填写 `wallpaperEnginePath` 和 `ffmpegPath`，或在提示中选择对应程序。
+4. 录制期间不要最小化或主动关闭 Wallpaper Engine 的专用弹出窗口。
+5. 重新选择该 Scene 并选择“重新录制”；旧缓存只有在新录制校验成功后才会被替换。
+
 ### 设置完成但壁纸没有显示？
 
 1. 打开 `View: Toggle Output`，在下拉列表选择 `Wallpaper Engine`。
@@ -147,6 +167,7 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 
 ```powershell
 npm install
+npm run build:scene-helper # 仅在修改 native helper 后执行，需要 Rust stable
 npm run check-types
 npm run lint
 npm test -- --runInBand
@@ -161,6 +182,8 @@ npm run vsce-package
 - `src/core/injector.ts`: Workbench HTML/JS 注入、CSP 本地来源补丁和沙箱 iframe 引导。
 - `src/core/server.ts`: 仅监听 `127.0.0.1` 的本地壁纸 HTTP 服务及健康检查接口。
 - `src/core/config-patcher.ts`: 透明化规则、主题兼容和托管配置备份。
+- `src/core/scene-recorder.ts`、`src/core/scene-cache.ts`: Scene 录制编排、缓存清单与校验。
+- `native/scene-capture-helper`: Windows Graphics Capture 原生 helper 源码；发布包使用 `bin/` 中的已构建程序。
 - `src/panels/setting-panel.ts`、`media/settings.*`: Wallpaper Settings 面板及中英文本地化。
 - `docs/COMMUNICATION.md`: Workbench、扩展宿主、本地服务与壁纸 iframe 的通信约定。
 

@@ -10,3 +10,4 @@ temp/
 
 # compiled vsix
 artifacts/
+native/scene-capture-helper/target/

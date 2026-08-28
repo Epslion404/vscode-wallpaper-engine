@@ -15,7 +15,9 @@ suite('Config Test Suite', () => {
             startupCheckInterval: 300,
             customCss: '',
             themeCompatibility: 'auto',
-            uiLanguage: 'auto'
+            uiLanguage: 'auto',
+            wallpaperEnginePath: '',
+            ffmpegPath: ''
         };
         const result = validateConfig(config);
         assert.strictEqual(result, false);
@@ -37,7 +39,9 @@ suite('Config Test Suite', () => {
                 startupCheckInterval: 300,
                 customCss: '',
                 themeCompatibility: 'auto',
-                uiLanguage: 'auto'
+                uiLanguage: 'auto',
+                wallpaperEnginePath: '',
+                ffmpegPath: ''
             };
             const result = validateConfig(config);
 

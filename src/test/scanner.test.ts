@@ -49,7 +49,7 @@ suite('Scanner Test Suite', () => {
         assert.strictEqual(items.length, 0);
     });
 
-    test('scanWallpapers should ignore native scene wallpapers', () => {
+    test('scanWallpapers should expose native scene wallpapers for recording', () => {
         const wpDir = path.join(tempDir, 'scene-wallpaper');
         fs.mkdirSync(wpDir);
         fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
@@ -57,10 +57,32 @@ suite('Scanner Test Suite', () => {
             file: 'scene.pkg',
             type: 'scene'
         }));
+        fs.writeFileSync(path.join(wpDir, 'scene.pkg'), 'scene package');
 
         const items = scanWallpapers(tempDir);
 
-        assert.strictEqual(items.length, 0);
+        assert.strictEqual(items.length, 1);
+        assert.strictEqual(items[0].type, WallpaperType.Scene);
+        assert.strictEqual(items[0].description, 'ID: scene-wallpaper [scene]');
+        assert.strictEqual(items[0].getSceneSource().projectJsonPath, path.join(wpDir, 'project.json'));
+        assert.strictEqual(items[0].getSceneSource().sourcePath, path.join(wpDir, 'scene.pkg'));
+        assert.throws(() => items[0].getMediaPath(), /必须先录制/);
+    });
+
+    test('Scene source resolution rejects declared path traversal and uses scene.pkg', () => {
+        const wpDir = path.join(tempDir, 'scene-safe-source');
+        fs.mkdirSync(wpDir);
+        fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
+            title: 'Safe Scene',
+            file: '..\\outside.pkg',
+            type: 'scene'
+        }));
+        fs.writeFileSync(path.join(wpDir, 'scene.pkg'), 'safe package');
+
+        const item = getWallpaperById(tempDir, 'scene-safe-source');
+
+        assert.ok(item);
+        assert.strictEqual(item.getSceneSource().sourcePath, path.join(wpDir, 'scene.pkg'));
     });
 
     test('getWallpaperById should reject paths outside the workshop root', () => {
@@ -173,15 +195,13 @@ suite('Scanner Test Suite', () => {
 
         assert.deepStrictEqual(result.statistics, {
             totalDirectories: 2,
-            available: 1,
+            available: 2,
             corrupted: 0,
-            unsupported: 1,
+            unsupported: 0,
             permissionDenied: 0
         });
-        assert.strictEqual(result.items.length, 1);
-        assert.strictEqual(result.diagnostics.length, 1);
-        assert.strictEqual(result.diagnostics[0].category, 'unsupported');
-        assert.strictEqual(result.diagnostics[0].wallpaperId, 'scene');
+        assert.strictEqual(result.items.length, 2);
+        assert.strictEqual(result.diagnostics.length, 0);
     });
 
     test('scanWallpapersWithDiagnostics should report malformed metadata as corrupted', () => {
@@ -214,7 +234,7 @@ suite('Scanner Test Suite', () => {
         fs.mkdirSync(wpDir);
         fs.writeFileSync(path.join(wpDir, 'project.json'), JSON.stringify({
             title: 'Unsupported',
-            type: 'scene'
+            type: 'unknown-type'
         }));
         const loggedMessages: string[] = [];
 

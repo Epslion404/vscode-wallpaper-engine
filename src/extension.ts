@@ -24,6 +24,13 @@ import { LifecycleState } from './core/lifecycle-state';
 import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
 import { evaluateUninstallSupersession, isPendingSetupState, needsWallpaperInjection } from './core/wallpaper-runtime';
 import { extractThemeDescriptors, shouldApplyThemeCompatibility } from './core/theme-compatibility';
+import { WallpaperType } from './core/types';
+import { SceneRecordingError } from './core/scene-recorder';
+import {
+    CURRENT_PLAYBACK_STATE_KEY,
+    WallpaperPlaybackDescriptor
+} from './core/playback-state';
+import { SceneWallpaperService } from './core/scene-wallpaper';
 
 // test
 import { openTestPage } from './playground/page';
@@ -52,6 +59,10 @@ const STAGE_MESSAGES: Record<WallpaperSetupStage, string> = {
     [WallpaperSetupStage.ValidateConfiguration]: '正在检查扩展配置…',
     [WallpaperSetupStage.ScanLibrary]: '正在扫描壁纸库…',
     [WallpaperSetupStage.SelectWallpaper]: '正在等待选择壁纸…',
+    [WallpaperSetupStage.PrepareScene]: '正在准备 Scene 壁纸…',
+    [WallpaperSetupStage.LaunchSceneRenderer]: '正在启动 Scene 渲染窗口…',
+    [WallpaperSetupStage.RecordScene]: '正在录制 Scene 壁纸…',
+    [WallpaperSetupStage.ValidateSceneCache]: '正在验证 Scene 视频缓存…',
     [WallpaperSetupStage.ValidateMedia]: '正在校验壁纸媒体…',
     [WallpaperSetupStage.StartServer]: '正在启动本地服务…',
     [WallpaperSetupStage.VerifyHealth]: '正在检查服务状态…',
@@ -94,6 +105,7 @@ export async function activate(context: vscode.ExtensionContext) {
     initializeTransparencyState(context);
     lifecycle = new LifecycleState(context.globalState.get<boolean>(DISABLED_KEY) ?? false);
     const initialConfig = getConfiguration();
+    const sceneWallpapers = new SceneWallpaperService(context, output);
     const getThemeCompatibility = (config: ReturnType<typeof getConfiguration>) => {
         const descriptors = vscode.extensions.all.flatMap(extension => {
             const packageJson: unknown = extension.packageJSON;
@@ -173,6 +185,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const persistedCleared = !context.globalState.get('currentWallpaperPath')
             && !context.globalState.get('currentWallpaperEntry')
             && !context.globalState.get('currentWallpaperLocation')
+            && !context.globalState.get(CURRENT_PLAYBACK_STATE_KEY)
             && !context.globalState.get(PENDING_SETUP_CONFIRMATION_KEY)
             && !initialConfig.wallpaperId;
         let serverStopped = true;
@@ -206,10 +219,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let recoveryReloadRequested = false;
     if (!lifecycle.disabled && !pendingUninstall && !invalidPendingUninstall) {
-        const savedPath = context.globalState.get<string>('currentWallpaperPath');
-        const savedEntry = context.globalState.get<string>('currentWallpaperEntry');
-        const savedLocation = context.globalState.get<string>('currentWallpaperLocation');
-        if (savedPath) {
+        const savedPlayback = await sceneWallpapers.resolveConfigured(initialConfig);
+        const savedPath = savedPlayback?.rootPath ?? context.globalState.get<string>('currentWallpaperPath');
+        const savedEntry = savedPlayback?.entryFile ?? context.globalState.get<string>('currentWallpaperEntry');
+        const savedLocation = savedPlayback?.location ?? context.globalState.get<string>('currentWallpaperLocation');
+        if (savedPath && savedPlayback) {
             try {
                 await server.start(savedPath, initialConfig.serverPort, savedEntry, savedLocation, true);
                 await server.verifyHealth();
@@ -226,33 +240,27 @@ export async function activate(context: vscode.ExtensionContext) {
                 workbenchPatched: isPatched()
             });
             if (recoveryNeeded) {
-                const savedItem = initialConfig.wallpaperId && initialConfig.workshopPath
-                    ? getWallpaperById(initialConfig.workshopPath, initialConfig.wallpaperId)
-                    : null;
-                if (savedItem) {
-                    try {
-                        const media = savedItem.getMediaPath();
-                        await performInjection(
-                            media.path,
-                            media.type,
-                            initialConfig.opacity,
-                            initialConfig.serverPort,
-                            initialConfig.resizeDelay,
-                            initialConfig.startupCheckInterval,
-                            false,
-                            SHOW_DEBUG_SIDEBAR
-                        );
-                        await applyTransparencyPatch();
-                        output.info('activation', '检测到 Workbench 注入缺失，已恢复并请求窗口重载');
-                        await vscode.commands.executeCommand('workbench.action.reloadWindow');
-                        recoveryReloadRequested = true;
-                    } catch (error) {
-                        output.error('activation', '恢复 Workbench 壁纸注入失败', error);
-                    }
-                } else {
-                    output.error('activation', '无法定位持久化壁纸媒体', new Error(`wallpaperId=${initialConfig.wallpaperId}`));
+                try {
+                    await performInjection(
+                        savedPlayback.mediaPath,
+                        savedPlayback.playbackType,
+                        initialConfig.opacity,
+                        initialConfig.serverPort,
+                        initialConfig.resizeDelay,
+                        initialConfig.startupCheckInterval,
+                        false,
+                        SHOW_DEBUG_SIDEBAR
+                    );
+                    await applyTransparencyPatch();
+                    output.info('activation', '检测到 Workbench 注入缺失，已恢复并请求窗口重载');
+                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                    recoveryReloadRequested = true;
+                } catch (error) {
+                    output.error('activation', '恢复 Workbench 壁纸注入失败', error);
                 }
             }
+        } else if (savedPath) {
+            output.error('activation', '无法定位持久化壁纸媒体', new Error(`wallpaperId=${initialConfig.wallpaperId}`));
         }
     }
 
@@ -323,17 +331,24 @@ export async function activate(context: vscode.ExtensionContext) {
             return; 
         }
 
-        const item = getWallpaperById(config.workshopPath, config.wallpaperId);
-        if (item) {
-            const { path: filePath, type } = item.getMediaPath();
-            const fileName = path.basename(filePath);
+        const playback = await sceneWallpapers.resolveConfigured(config);
+        if (playback) {
             
             if (server) {
-                await server.start(item.dirPath, config.serverPort, fileName, item.location);
+                await server.start(playback.rootPath, config.serverPort, playback.entryFile, playback.location);
                 syncServerCssConfig(config);
             }
 
-            await performInjection(filePath, type, config.opacity, config.serverPort, config.resizeDelay, config.startupCheckInterval, false, SHOW_DEBUG_SIDEBAR);
+            await performInjection(
+                playback.mediaPath,
+                playback.playbackType,
+                config.opacity,
+                config.serverPort,
+                config.resizeDelay,
+                config.startupCheckInterval,
+                false,
+                SHOW_DEBUG_SIDEBAR
+            );
             
             // Apply transparency patch
             await applyTransparencyPatch();
@@ -348,6 +363,8 @@ export async function activate(context: vscode.ExtensionContext) {
                     await vscode.commands.executeCommand('workbench.action.reloadWindow');
                 }
             }
+        } else if (!silent) {
+            await vscode.window.showErrorMessage('当前壁纸没有可用的播放文件；Scene 壁纸请重新执行“设置壁纸”完成录制。');
         }
     };
 
@@ -373,6 +390,10 @@ export async function activate(context: vscode.ExtensionContext) {
             'themeCompatibility', 'uiLanguage'
         ].filter(key => e.affectsConfiguration(`vscode-wallpaper-engine.${key}`));
         const { wallpaper, transparency } = classifyConfigurationChange(changedKeys);
+
+        if (changedKeys.includes('workshopPath')) {
+            await context.globalState.update(CURRENT_PLAYBACK_STATE_KEY, undefined);
+        }
 
         if (changedKeys.includes('themeCompatibility')) {
             const config = getConfiguration();
@@ -535,21 +556,70 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const { path: filePath, type } = selected.getMediaPath();
+        const operationId = createOperationId();
+        let playback: WallpaperPlaybackDescriptor | undefined;
+        try {
+            const preparationStage = selected.type === WallpaperType.Scene
+                ? WallpaperSetupStage.PrepareScene
+                : WallpaperSetupStage.ValidateMedia;
+            SettingsPanel.publishSetupState({
+                status: 'running',
+                stage: preparationStage,
+                message: STAGE_MESSAGES[preparationStage]
+            });
+            playback = await sceneWallpapers.prepareSelected(selected, config, operationId);
+        } catch (error) {
+            if (error instanceof SceneRecordingError && error.code === 'cancelled') {
+                output.info(operationId, '用户取消 Scene 录制');
+                SettingsPanel.publishSetupState({ status: 'idle', message: '已取消 Scene 录制' });
+                return;
+            }
+            output.error(operationId, '准备 Scene 壁纸失败', error);
+            const english = sceneWallpapers.isEnglishUi(config);
+            const reason = error instanceof SceneRecordingError && error.code === 'blackFrames'
+                ? english
+                    ? 'The Scene recording contains only black frames. Window capture is unavailable in this environment.'
+                    : 'Scene 录制结果为黑帧，当前环境的窗口捕获不可用。'
+                : english
+                    ? `Failed to prepare the Scene wallpaper: ${toUserErrorReason(error)}`
+                    : `准备 Scene 壁纸失败：${toUserErrorReason(error)}`;
+            SettingsPanel.publishSetupState({
+                status: 'error',
+                stage: WallpaperSetupStage.PrepareScene,
+                message: reason
+            });
+            const retryLabel = english ? 'Retry' : '重试';
+            const settingsLabel = english ? 'Open Settings' : '打开设置';
+            const logLabel = english ? 'Show Log' : '查看日志';
+            const action = await vscode.window.showErrorMessage(reason, retryLabel, settingsLabel, logLabel);
+            if (action === retryLabel) {
+                setTimeout(() => void vscode.commands.executeCommand('vscode-wallpaper-engine.setWallpaper'), 0);
+            } else if (action === settingsLabel) {
+                await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vakesamahere.vscode-wallpaper-engine');
+            } else if (action === logLabel) {
+                output.show();
+            }
+            return;
+        }
+        if (!playback) {
+            output.info(operationId, '用户取消 Scene 缓存选择或依赖配置');
+            SettingsPanel.publishSetupState({ status: 'idle', message: '已取消设置壁纸' });
+            return;
+        }
+
         const setupInput: WallpaperSetupInput = {
             wallpaperId: selected.id,
-            wallpaperTitle: selected.label.replace(/^\$\([^)]*\)\s*/, ''),
-            dirPath: selected.dirPath,
-            filePath,
-            fileName: path.basename(filePath),
-            type,
+            wallpaperTitle: playback.wallpaperTitle,
+            dirPath: playback.rootPath,
+            filePath: playback.mediaPath,
+            fileName: playback.entryFile,
+            type: playback.playbackType,
             port: config.serverPort,
             opacity: config.opacity,
             resizeDelay: config.resizeDelay,
             startupCheckInterval: config.startupCheckInterval,
-            location: selected.location
+            location: playback.location
         };
-        const operationId = createOperationId();
         try {
             await context.globalState.update(PENDING_UNINSTALL_KEY, undefined);
             if (lifecycle.disabled) {
@@ -573,7 +643,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
         const oldWallpaperId = config.wallpaperId;
-        const oldWallpaper = oldWallpaperId ? getWallpaperById(config.workshopPath, oldWallpaperId) : null;
+        const oldPlayback = await sceneWallpapers.resolveConfigured(config);
         output.info(operationId, `开始设置壁纸「${setupInput.wallpaperTitle}」`);
         try {
             await vscode.window.withProgress({
@@ -607,30 +677,32 @@ export async function activate(context: vscode.ExtensionContext) {
                         false,
                         SHOW_DEBUG_SIDEBAR
                     ),
-                    updateWallpaperId: wallpaperId => vscode.workspace
-                        .getConfiguration('vscode-wallpaper-engine')
-                        .update('wallpaperId', wallpaperId, vscode.ConfigurationTarget.Global),
+                    updateWallpaperId: async wallpaperId => {
+                        await context.globalState.update(CURRENT_PLAYBACK_STATE_KEY, playback);
+                        await vscode.workspace.getConfiguration('vscode-wallpaper-engine')
+                            .update('wallpaperId', wallpaperId, vscode.ConfigurationTarget.Global);
+                    },
                     savePendingConfirmation: confirmation => context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, confirmation),
                     reloadWorkbench: () => vscode.commands.executeCommand('workbench.action.reloadWindow').then(() => undefined),
                     rollback: async () => {
                         await context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined);
+                        await context.globalState.update(CURRENT_PLAYBACK_STATE_KEY, oldPlayback);
                         await vscode.workspace.getConfiguration('vscode-wallpaper-engine')
                             .update('wallpaperId', oldWallpaperId, vscode.ConfigurationTarget.Global);
-                        if (server && oldWallpaper) {
-                            const previousMedia = oldWallpaper.getMediaPath();
+                        if (server && oldPlayback) {
                             await server.start(
-                                oldWallpaper.dirPath,
+                                oldPlayback.rootPath,
                                 config.serverPort,
-                                path.basename(previousMedia.path),
-                                oldWallpaper.location,
+                                oldPlayback.entryFile,
+                                oldPlayback.location,
                                 true
                             );
                             syncServerCssConfig(config);
                             await server.verifyHealth();
                             await server.verifyEntry();
                             await performInjection(
-                                previousMedia.path,
-                                previousMedia.type,
+                                oldPlayback.mediaPath,
+                                oldPlayback.playbackType,
                                 config.opacity,
                                 config.serverPort,
                                 config.resizeDelay,

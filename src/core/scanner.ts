@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WallpaperType } from './types';
+import { PlayableWallpaperType, WallpaperType } from './types';
+import { SceneSource } from './scene-cache';
 
 export type WallpaperDiagnosticCategory = 'corrupted' | 'unsupported' | 'permissionDenied';
 
@@ -58,6 +59,7 @@ export class WallpaperItem implements vscode.QuickPickItem {
     type: WallpaperType;
     id: string;
     location: string;
+    projectJsonPath: string;
 
     constructor(title: string, id: string, file: string, dirPath: string, type: WallpaperType, location?: string) {
         this.label = `$(device-camera-video) ${title}`;
@@ -67,9 +69,14 @@ export class WallpaperItem implements vscode.QuickPickItem {
         this.type = type;
         this.id = id;
         this.location = location || dirPath;
+        this.projectJsonPath = path.join(dirPath, 'project.json');
     }
 
-    getMediaPath(): { path: string, type: WallpaperType } {
+    getMediaPath(): { path: string, type: PlayableWallpaperType } {
+        if (this.type === WallpaperType.Scene) {
+            // 禁止 Scene 绕过录制准备流程进入注入器。
+            throw new Error('Scene 壁纸必须先录制为视频缓存');
+        }
         const mainFile = this.detail || 'index.html';
         let finalPath = path.join(this.location, mainFile);
 
@@ -81,6 +88,36 @@ export class WallpaperItem implements vscode.QuickPickItem {
             }
         }
         return { path: finalPath, type: this.type };
+    }
+
+    getSceneSource(): SceneSource {
+        if (this.type !== WallpaperType.Scene) {
+            throw new Error('当前壁纸不是 Scene 类型');
+        }
+        const sourceRoot = path.resolve(this.location);
+        const realSourceRoot = fs.realpathSync.native(sourceRoot);
+        const candidates = [
+            path.resolve(sourceRoot, this.detail),
+            path.resolve(sourceRoot, 'scene.pkg')
+        ];
+        const sourcePath = candidates.find(candidate => {
+            if (!isInside(sourceRoot, candidate)) {
+                return false;
+            }
+            try {
+                return isInside(realSourceRoot, fs.realpathSync.native(candidate));
+            } catch {
+                return false;
+            }
+        });
+        if (!sourcePath) {
+            throw new Error('Scene 入口资源不存在或超出壁纸目录');
+        }
+        return {
+            wallpaperId: this.id,
+            projectJsonPath: this.projectJsonPath,
+            sourcePath
+        };
     }
 }
 
@@ -184,7 +221,9 @@ function resolveWallpaperInfo(
             ? WallpaperType.Image
             : rawType === 'web'
                 ? WallpaperType.Web
-                : null;
+                : rawType === 'scene'
+                    ? WallpaperType.Scene
+                    : null;
     const file = typeof parsed.json.file === 'string' && parsed.json.file ? parsed.json.file : undefined;
 
     if (type) {

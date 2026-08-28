@@ -11,6 +11,7 @@ docs/**
 out/**
 node_modules/**
 scripts/**
+native/**
 src/**
 .gitignore
 .yarnrc

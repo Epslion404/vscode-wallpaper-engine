@@ -4,6 +4,19 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+### Added
+
+- 原生 Scene 壁纸可通过 Wallpaper Engine 命名窗口自动录制为静音 VP9/WebM 缓存；录制时长默认 30 秒，可设置为 1–300 秒。
+- 已有 Scene 缓存支持直接复用或重新录制；录制支持进度、取消、失败清理和旧缓存保护。
+- 新增 Windows Graphics Capture helper，解决硬件加速 Scene 使用 GDI 捕获时全黑的问题。
+- 新增 Wallpaper Engine 与 FFmpeg 自动探测及自定义路径设置。
+
+### Fixed
+
+- Scene 播放状态持久化为实际缓存视频描述符，确保重载恢复、自动应用和设置回滚不会误用原始 Scene 资源。
+
 ## [0.1.2] - 2026-08-28
 
 ### Fixed
