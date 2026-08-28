@@ -12,9 +12,30 @@ const TRANSPARENCY_BACKUP_KEY = 'transparencyColorBackups';
 let globalState: vscode.Memento | undefined;
 let workspaceState: vscode.Memento | undefined;
 
+export type TransparencyPatchTarget =
+    | vscode.ConfigurationTarget.Global
+    | vscode.ConfigurationTarget.Workspace;
+
+/** 将单一作用域参数规范化为有序、去重的作用域列表。 */
+export function normalizeTransparencyTargets(
+    target?: TransparencyPatchTarget | readonly TransparencyPatchTarget[]
+): TransparencyPatchTarget[] {
+    const targets = target === undefined
+        ? [vscode.ConfigurationTarget.Global, vscode.ConfigurationTarget.Workspace]
+        : Array.isArray(target) ? target : [target];
+    return [...new Set(targets)];
+}
+
 export function initializeTransparencyState(context: vscode.ExtensionContext): void {
     globalState = context.globalState;
     workspaceState = context.workspaceState;
+}
+
+/** 返回两个配置作用域是否仍存在插件托管的颜色备份。 */
+export function hasTransparencyBackups(): boolean {
+    const globalBackups = globalState?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    const workspaceBackups = workspaceState?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    return Object.keys(globalBackups).length > 0 || Object.keys(workspaceBackups).length > 0;
 }
 
 // 【透明化目标列表】所有可能遮挡壁纸的 UI 元素 Key
@@ -72,7 +93,7 @@ export const TRANSPARENT_COLOR_KEYS = [
  * 自动将 VS Code UI 关键元素的背景色设置为完全透明。
  * @param target 目标配置作用域 (Global 或 Workspace)
  */
-export async function applyTransparencyPatch(target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global) {
+export async function applyTransparencyPatch(target: TransparencyPatchTarget = vscode.ConfigurationTarget.Global) {
     const config = vscode.workspace.getConfiguration();
     const enabled = config.get<boolean>('vscode-wallpaper-engine.transparencyEnabled') ?? true;
 
@@ -181,8 +202,40 @@ export async function applyTransparencyPatch(target: vscode.ConfigurationTarget 
 
 /**
  * 移除我们设置的所有透明度规则。
+ * 未指定作用域时会清理 Global 与 Workspace；传入单个作用域可用于
+ * 设置变更回滚等局部操作。
  */
-export async function removeTransparencyPatch(target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global) {
+export async function removeTransparencyPatch(
+    target?: TransparencyPatchTarget | readonly TransparencyPatchTarget[]
+) {
+    const targets = normalizeTransparencyTargets(target);
+    const failures: Array<{ target: TransparencyPatchTarget; error: unknown }> = [];
+
+    // 每个作用域独立处理，保证一个 settings.json 写入失败不会跳过另一个作用域。
+    for (const scope of targets) {
+        try {
+            await removeTransparencyPatchForTarget(scope);
+        } catch (error) {
+            failures.push({ target: scope, error });
+            console.error(`[Transparency] Failed to remove ${scope} patch:`, error);
+        }
+    }
+
+    if (failures.length > 0) {
+        throw new TransparencyPatchRemovalError(failures);
+    }
+}
+
+export class TransparencyPatchRemovalError extends Error {
+    public constructor(
+        public readonly failures: ReadonlyArray<{ target: TransparencyPatchTarget; error: unknown }>
+    ) {
+        super(`透明化配置移除失败（${failures.length} 个作用域）`);
+        this.name = 'TransparencyPatchRemovalError';
+    }
+}
+
+async function removeTransparencyPatchForTarget(target: TransparencyPatchTarget): Promise<void> {
     const config = vscode.workspace.getConfiguration();
     const existingCustomizations = getTargetCustomizations(config, target);
     const state = getState(target);

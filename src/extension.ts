@@ -5,9 +5,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { getConfiguration, getConfigValidationError } from './config';
 import { scanWallpapersWithDiagnostics, getWallpaperById, WallpaperScanStatistics } from './core/scanner';
-import { performInjection, restoreWorkbench } from './core/injector';
+import { isPatched, performInjection, restoreWorkbench } from './core/injector';
 import { validateWallpaperMedia, WallpaperServer } from './core/server';
-import { applyTransparencyPatch, initializeTransparencyState, removeTransparencyPatch } from './core/config-patcher';
+import { applyTransparencyPatch, hasTransparencyBackups, initializeTransparencyState, removeTransparencyPatch } from './core/config-patcher';
 import { SettingsPanel } from './panels/setting-panel';
 import { classifyConfigurationChange } from './configuration-change';
 import { WallpaperOutput } from './core/output';
@@ -21,6 +21,8 @@ import {
     WallpaperSetupInput,
     WallpaperSetupStage
 } from './core/wallpaper-setup';
+import { LifecycleState } from './core/lifecycle-state';
+import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
 
 // test
 import { openTestPage } from './playground/page';
@@ -28,7 +30,22 @@ import { openTestPage } from './playground/page';
 const SHOW_DEBUG_SIDEBAR = false; // [Dev] Toggle Debug Sidebar
 
 let server: WallpaperServer | undefined;
-let isSettingWallpaper = false;
+let lifecycle: LifecycleState | undefined;
+const PENDING_UNINSTALL_KEY = 'pendingUninstall';
+const DISABLED_KEY = 'wallpaperEngineDisabled';
+
+const UNINSTALL_STAGE_MESSAGES: Record<UninstallStage, string> = {
+    [UninstallStage.AcquireLock]: '正在锁定壁纸生命周期操作…',
+    [UninstallStage.Disable]: '正在暂停自动注入…',
+    [UninstallStage.ClearPendingSetup]: '正在清理待确认状态…',
+    [UninstallStage.RestoreWorkbench]: '正在恢复 Workbench 文件…',
+    [UninstallStage.RemoveTransparency]: '正在恢复透明化配置…',
+    [UninstallStage.StopServer]: '正在停止本地壁纸服务…',
+    [UninstallStage.ClearPersistedState]: '正在清理壁纸运行状态…',
+    [UninstallStage.SavePending]: '正在保存重载后的验证任务…',
+    [UninstallStage.ReloadWorkbench]: '正在重新加载窗口…',
+    [UninstallStage.ReleaseLock]: '正在释放操作锁…'
+};
 
 const STAGE_MESSAGES: Record<WallpaperSetupStage, string> = {
     [WallpaperSetupStage.ValidateConfiguration]: '正在检查扩展配置…',
@@ -74,22 +91,73 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(output);
     server = new WallpaperServer(context);
     initializeTransparencyState(context);
+    lifecycle = new LifecycleState(context.globalState.get<boolean>(DISABLED_KEY) ?? false);
     const initialConfig = getConfiguration();
-    const savedPath = context.globalState.get<string>('currentWallpaperPath');
-    const savedEntry = context.globalState.get<string>('currentWallpaperEntry');
-    const savedLocation = context.globalState.get<string>('currentWallpaperLocation');
+    const pendingUninstallCandidate: unknown = context.globalState.get(PENDING_UNINSTALL_KEY);
+    const pendingUninstall = isPendingUninstall(pendingUninstallCandidate)
+        ? pendingUninstallCandidate
+        : undefined;
+    const invalidPendingUninstall = pendingUninstallCandidate !== undefined && !pendingUninstall;
+    if (pendingUninstallCandidate !== undefined && !pendingUninstall) {
+        await context.globalState.update(PENDING_UNINSTALL_KEY, undefined);
+        await context.globalState.update(DISABLED_KEY, true);
+        lifecycle.setDisabled(true);
+        console.warn('[Wallpaper] 丢弃格式无效的 pending uninstall 记录');
+    }
     let restoredServer = false;
-    if (savedPath) {
+    if (pendingUninstall) {
+        lifecycle.setDisabled(true);
+        await context.globalState.update(DISABLED_KEY, true);
+        const persistedCleared = !context.globalState.get('currentWallpaperPath')
+            && !context.globalState.get('currentWallpaperEntry')
+            && !context.globalState.get('currentWallpaperLocation')
+            && !context.globalState.get(PENDING_SETUP_CONFIRMATION_KEY)
+            && !initialConfig.wallpaperId;
+        let serverStopped = true;
         try {
-            await server.start(savedPath, initialConfig.serverPort, savedEntry, savedLocation, true);
-            restoredServer = true;
-        } catch (error) {
-            output.error('activation', '恢复壁纸服务失败', error);
+            await server.verifyHealth(500);
+            serverStopped = false;
+        } catch {
+            serverStopped = true;
+        }
+        const verification = verifyUninstallState({
+            workbenchRestored: !isPatched(),
+            serverStopped,
+            transparencyBackupsEmpty: !hasTransparencyBackups(),
+            persistedStateCleared: persistedCleared
+        });
+        if (verification.ok) {
+            await context.globalState.update(PENDING_UNINSTALL_KEY, undefined);
+            output.info(pendingUninstall.operationId, '卸载还原验证通过');
+            vscode.window.setStatusBarMessage('$(check) 壁纸修改已还原', 5000);
+            await vscode.window.showInformationMessage('壁纸修改已还原，当前窗口不会再自动注入壁纸。');
+        } else {
+            output.error(pendingUninstall.operationId, `卸载还原验证失败：${verification.failures.join('；')}`, new Error('重载后状态未完全清理'));
+            const action = await vscode.window.showErrorMessage('壁纸修改已部分还原，仍有状态需要清理。', '重试', '查看日志');
+            if (action === '重试') {
+                await vscode.commands.executeCommand('vscode-wallpaper-engine.uninstallWallpaper');
+            } else if (action === '查看日志') {
+                output.show();
+            }
+        }
+    }
+
+    if (!lifecycle.disabled && !pendingUninstall && !invalidPendingUninstall) {
+        const savedPath = context.globalState.get<string>('currentWallpaperPath');
+        const savedEntry = context.globalState.get<string>('currentWallpaperEntry');
+        const savedLocation = context.globalState.get<string>('currentWallpaperLocation');
+        if (savedPath) {
+            try {
+                await server.start(savedPath, initialConfig.serverPort, savedEntry, savedLocation, true);
+                restoredServer = true;
+            } catch (error) {
+                output.error('activation', '恢复壁纸服务失败', error);
+            }
         }
     }
 
     const pendingConfirmation = context.globalState.get<PendingSetupConfirmation>(PENDING_SETUP_CONFIRMATION_KEY);
-    if (pendingConfirmation) {
+    if (pendingConfirmation && !lifecycle.disabled) {
         await context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined);
         const shouldConfirm = shouldConfirmPendingSetup(pendingConfirmation, initialConfig.wallpaperId, Date.now());
         if (restoredServer && shouldConfirm) {
@@ -132,6 +200,15 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const applyWallpaper = async (forceReload = false, silent = false) => {
+        if (lifecycle?.disabled) {
+            if (!silent) {
+                await vscode.window.showInformationMessage('壁纸修改已还原。请重新执行“设置壁纸”以启用。');
+            }
+            return;
+        }
+        if (lifecycle?.currentOperation === 'uninstall') {
+            return;
+        }
         const config = getConfiguration();
         if (!config.wallpaperId || !config.workshopPath) {
             if (!silent) {
@@ -170,9 +247,20 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
 
+    const applyWallpaperWithLock = async (forceReload = false, silent = true): Promise<void> => {
+        if (!lifecycle || !lifecycle.tryBegin('setup')) { return; }
+        try {
+            await applyWallpaper(forceReload, silent);
+        } catch (error) {
+            output.error('automatic-apply', '配置变更后自动应用壁纸失败', error);
+        } finally {
+            lifecycle.end('setup');
+        }
+    };
+
     // Watch for config changes
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async e => {
-        if (isSettingWallpaper) { return; }
+        if (!lifecycle || lifecycle.disabled || lifecycle.currentOperation !== undefined) { return; }
         
         const changedKeys = [
             'wallpaperId', 'workshopPath', 'backgroundOpacity', 'serverPort',
@@ -186,24 +274,37 @@ export async function activate(context: vscode.ExtensionContext) {
              if (config.wallpaperId && config.workshopPath) {
                 const item = getWallpaperById(config.workshopPath, config.wallpaperId);
                 if (item && server) {
-                    await applyWallpaper(false, true);
+                    await applyWallpaperWithLock(false, true);
                     return;
                 }
              }
         }
 
         if (wallpaper) {
-            await applyWallpaper(changedKeys.includes('serverPort'));
+            await applyWallpaperWithLock(changedKeys.includes('serverPort'), false);
         } else if (transparency) {
-            await applyTransparencyPatch();
+            if (lifecycle.tryBegin('setup')) {
+                try {
+                    await applyTransparencyPatch();
+                } finally {
+                    lifecycle.end('setup');
+                }
+            }
         }
     }));
 
     // Watch for theme changes to re-apply transparency patch with correct base color
     context.subscriptions.push(vscode.window.onDidChangeActiveColorTheme(async () => {
+        if (!lifecycle || lifecycle.disabled || lifecycle.currentOperation !== undefined) { return; }
         // Wait a bit for the theme to fully apply
         setTimeout(async () => {
-            await applyTransparencyPatch();
+            if (!lifecycle || lifecycle.disabled || lifecycle.currentOperation !== undefined) { return; }
+            if (!lifecycle.tryBegin('setup')) { return; }
+            try {
+                await applyTransparencyPatch();
+            } finally {
+                lifecycle.end('setup');
+            }
         }, 1000);
     }));
 
@@ -240,12 +341,15 @@ export async function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(disposable);
 
 	// command to set wallpaper
-	const setWallPaperCmd = vscode.commands.registerCommand('vscode-wallpaper-engine.setWallpaper', async () => {
-        if (isSettingWallpaper) {
+    const setWallPaperCmd = vscode.commands.registerCommand('vscode-wallpaper-engine.setWallpaper', async () => {
+        if (!lifecycle) {
+            await vscode.window.showErrorMessage('壁纸生命周期尚未初始化。');
+            return;
+        }
+        if (!lifecycle.tryBegin('setup')) {
             vscode.window.setStatusBarMessage('$(sync~spin) 已有壁纸设置任务正在进行', 3000);
             return;
         }
-        isSettingWallpaper = true;
         let retryRequested = false;
         try {
         SettingsPanel.publishSetupState({
@@ -266,6 +370,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 await vscode.commands.executeCommand('workbench.action.openSettings', 'vscode-wallpaper-engine.workshopPath');
             }
             return;
+        }
+
+        // 只有配置有效、确实开始设置时才解除卸载禁用闸门。
+        if (lifecycle.disabled) {
+            lifecycle.setDisabled(false);
+            await context.globalState.update(DISABLED_KEY, false);
         }
 
         SettingsPanel.publishSetupState({
@@ -426,7 +536,7 @@ export async function activate(context: vscode.ExtensionContext) {
             if (action === '查看日志') { output.show(); }
         }
         } finally {
-            isSettingWallpaper = false;
+            lifecycle.end('setup');
         }
         if (retryRequested) {
             await vscode.commands.executeCommand('vscode-wallpaper-engine.setWallpaper');
@@ -443,22 +553,71 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const uninstallCmd = vscode.commands.registerCommand('vscode-wallpaper-engine.uninstallWallpaper', async () => {
         const confirm = await vscode.window.showWarningMessage(
-            '确定要卸载 Wallpaper Engine 插件吗？这将移除所有注入的代码和修改。',
+            '确定要还原 Wallpaper Engine 的注入和透明化修改吗？扩展仍会保留，但不会再自动应用壁纸。',
             { modal: true },
-            '卸载'
+            '还原修改'
         );
-        if (confirm === '卸载') {
-            const operationId = createOperationId();
-            try {
-                await restoreWorkbench();
-                await removeTransparencyPatch();
-                await server?.stop();
-                output.info(operationId, 'Workbench、透明化配置和壁纸服务已还原');
-                await vscode.window.showInformationMessage('Wallpaper Engine 已还原。');
-            } catch (error: unknown) {
-                output.error(operationId, '卸载还原失败', error);
-                const action = await vscode.window.showErrorMessage(`卸载还原失败：${toUserErrorReason(error)}`, '查看日志');
-                if (action === '查看日志') { output.show(); }
+        if (confirm !== '还原修改' || !lifecycle) {
+            return;
+        }
+        if (lifecycle.currentOperation !== undefined) {
+            await vscode.window.showWarningMessage('已有壁纸操作正在进行，请完成后再还原。');
+            return;
+        }
+        const operationId = createOperationId();
+        const result = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: '正在还原壁纸修改',
+            cancellable: false
+        }, async progress => runUninstall({
+            disable: async () => {
+                lifecycle?.setDisabled(true);
+                await context.globalState.update(DISABLED_KEY, true);
+            },
+            clearPendingSetup: () => context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined),
+            restoreWorkbench,
+            removeTransparency: () => removeTransparencyPatch(),
+            stopServer: () => server?.stop() ?? Promise.resolve(),
+            clearPersistedState: async () => {
+                if (server) {
+                    await server.clearPersistedWallpaperState();
+                }
+                await vscode.workspace.getConfiguration('vscode-wallpaper-engine')
+                    .update('wallpaperId', '', vscode.ConfigurationTarget.Global);
+            },
+            savePendingUninstall: pending => context.globalState.update(PENDING_UNINSTALL_KEY, pending),
+            reloadWorkbench: () => vscode.commands.executeCommand('workbench.action.reloadWindow').then(() => undefined),
+            report: stage => {
+                const message = UNINSTALL_STAGE_MESSAGES[stage];
+                progress.report({ message });
+                output.info(operationId, `${stage}: ${message}`);
+                vscode.window.setStatusBarMessage(`$(sync~spin) ${message}`, 3000);
+            },
+            createOperationId: () => operationId,
+            now: () => Date.now(),
+            acquireLock: () => Promise.resolve(lifecycle!.tryBegin('uninstall')),
+            releaseLock: () => {
+                lifecycle!.end('uninstall');
+                return Promise.resolve();
+            }
+        }));
+        if (result.reloaded) {
+            return;
+        }
+        if (result.errors.length === 0) {
+            output.info(operationId, '壁纸修改已还原，无需重载');
+            await vscode.window.showInformationMessage('壁纸修改已还原。');
+        } else {
+            result.errors.forEach(error => output.error(operationId, `还原步骤 ${error.stage} 失败`, error));
+            const action = await vscode.window.showErrorMessage(
+                `壁纸修改已部分还原（${result.errors.length} 个步骤失败）。`,
+                '重试',
+                '查看日志'
+            );
+            if (action === '重试') {
+                await vscode.commands.executeCommand('vscode-wallpaper-engine.uninstallWallpaper');
+            } else if (action === '查看日志') {
+                output.show();
             }
         }
     });
@@ -510,11 +669,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
 // This method is called when your extension is deactivated
 export async function deactivate() {
-    try {
-        await restoreWorkbench();
-        await removeTransparencyPatch();
-        await server?.stop();
-    } catch (error: unknown) {
-        console.error('[Wallpaper] Deactivation cleanup failed:', error);
-    }
+    const cleanup = async (label: string, action: () => PromiseLike<void>): Promise<void> => {
+        try {
+            await action();
+        } catch (error: unknown) {
+            console.error(`[Wallpaper] Deactivation cleanup failed (${label}):`, error);
+        }
+    };
+    await cleanup('restoreWorkbench', restoreWorkbench);
+    await cleanup('removeTransparencyPatch', () => removeTransparencyPatch());
+    await cleanup('stopServer', () => server?.stop() ?? Promise.resolve());
 }

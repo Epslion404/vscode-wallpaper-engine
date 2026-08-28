@@ -9,7 +9,8 @@ import {
     validateWallpaperMedia,
     waitForServerListening,
     WallpaperServer,
-    WallpaperServerStartupTimeoutError
+    WallpaperServerStartupTimeoutError,
+    PersistedWallpaperStateError
 } from '../core/server';
 
 function createContext(): vscode.ExtensionContext {
@@ -184,5 +185,88 @@ suite('WallpaperServer lifecycle and preflight', () => {
         await server.start(root, 0, 'index.html', root, true);
 
         await assert.rejects(server.triggerReloadAndWait(20), /刷新信号.*超时/);
+    });
+
+    test('clearPersistedWallpaperState clears recovery and pending setup keys', async () => {
+        const values = new Map<string, unknown>([
+            ['currentWallpaperPath', root],
+            ['currentWallpaperEntry', 'index.html'],
+            ['currentWallpaperLocation', root],
+            ['pendingSetupConfirmation', { wallpaperId: 'wallpaper' }]
+        ]);
+        const context = {
+            globalState: {
+                get<T>(key: string): T | undefined { return values.get(key) as T | undefined; },
+                update(key: string, value: unknown): Thenable<void> {
+                    values.set(key, value);
+                    return Promise.resolve();
+                }
+            }
+        } as unknown as vscode.ExtensionContext;
+        server = new WallpaperServer(context);
+
+        await server.clearPersistedWallpaperState();
+
+        for (const key of ['currentWallpaperPath', 'currentWallpaperEntry', 'currentWallpaperLocation', 'pendingSetupConfirmation']) {
+            assert.strictEqual(values.get(key), undefined, `expected ${key} to be cleared`);
+        }
+    });
+
+    test('stop preserves persisted recovery state for ordinary shutdowns', async () => {
+        const values = new Map<string, unknown>([
+            ['currentWallpaperPath', root],
+            ['currentWallpaperEntry', 'index.html'],
+            ['currentWallpaperLocation', root]
+        ]);
+        const context = {
+            globalState: {
+                get<T>(key: string): T | undefined { return values.get(key) as T | undefined; },
+                update(key: string, value: unknown): Thenable<void> {
+                    values.set(key, value);
+                    return Promise.resolve();
+                }
+            }
+        } as unknown as vscode.ExtensionContext;
+        server = new WallpaperServer(context);
+
+        await server.stop();
+
+        assert.strictEqual(values.get('currentWallpaperPath'), root);
+        assert.strictEqual(values.get('currentWallpaperEntry'), 'index.html');
+        assert.strictEqual(values.get('currentWallpaperLocation'), root);
+    });
+
+    test('clearPersistedWallpaperState attempts every key before reporting failures', async () => {
+        const updates: string[] = [];
+        const context = {
+            globalState: {
+                get<T>(_key: string): T | undefined { return undefined; },
+                update(key: string, _value: unknown): Thenable<void> {
+                    updates.push(key);
+                    if (key === 'currentWallpaperEntry') {
+                        return Promise.reject(new Error('write failed'));
+                    }
+                    return Promise.resolve();
+                }
+            }
+        } as unknown as vscode.ExtensionContext;
+        server = new WallpaperServer(context);
+
+        await assert.rejects(
+            server.clearPersistedWallpaperState(),
+            error => {
+                if (!(error instanceof PersistedWallpaperStateError)) {
+                    return false;
+                }
+                return error.failures.length === 1
+                    && error.failures[0].key === 'currentWallpaperEntry';
+            }
+        );
+        assert.deepStrictEqual(updates, [
+            'currentWallpaperPath',
+            'currentWallpaperEntry',
+            'currentWallpaperLocation',
+            'pendingSetupConfirmation'
+        ]);
     });
 });

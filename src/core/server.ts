@@ -15,11 +15,28 @@ import {
     WallpaperPreflightError,
     WallpaperServerStartupTimeoutError
 } from './server-preflight';
+import { PENDING_SETUP_CONFIRMATION_KEY } from './wallpaper-setup';
 
 export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupTimeoutError } from './server-preflight';
 
 const SERVER_STARTUP_TIMEOUT_MS = 5000;
 const SERVER_PREFLIGHT_TIMEOUT_MS = 3000;
+
+const PERSISTED_WALLPAPER_STATE_KEYS = [
+    'currentWallpaperPath',
+    'currentWallpaperEntry',
+    'currentWallpaperLocation',
+    PENDING_SETUP_CONFIRMATION_KEY
+] as const;
+
+export class PersistedWallpaperStateError extends Error {
+    public constructor(
+        public readonly failures: ReadonlyArray<{ key: string; error: unknown }>
+    ) {
+        super(`壁纸持久状态清理失败（${failures.length} 项）`);
+        this.name = 'PersistedWallpaperStateError';
+    }
+}
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -1068,6 +1085,28 @@ ${baseTag}
             waiter.reject(new Error('壁纸服务器已停止，刷新信号未被客户端确认'));
         }
         console.log('[Server] Server stopped.');
+    }
+
+    /**
+     * 清除用于启动恢复的扩展状态，但不停止当前服务。
+     *
+     * `stop()` 有意保留这些值，便于普通服务重启；显式还原流程应在
+     * 停止服务后调用本方法，避免 VS Code 重载时依据旧状态恢复壁纸。
+     */
+    public async clearPersistedWallpaperState(): Promise<void> {
+        const failures: Array<{ key: string; error: unknown }> = [];
+        for (const key of PERSISTED_WALLPAPER_STATE_KEYS) {
+            try {
+                await this.context.globalState.update(key, undefined);
+            } catch (error) {
+                failures.push({ key, error });
+                console.error(`[Server] Failed to clear persisted state ${key}:`, error);
+            }
+        }
+        if (failures.length > 0) {
+            throw new PersistedWallpaperStateError(failures);
+        }
+        console.log('[Server] Persisted wallpaper state cleared.');
     }
 
     public broadcast(data: JsonValue) {

@@ -34,7 +34,7 @@
       },
       {
         "command": "vscode-wallpaper-engine.uninstallWallpaper",
-        "title": "Uninstall Wallpaper Engine: 卸载插件"
+        "title": "Restore Wallpaper Changes: 还原壁纸修改"
       },
       {
         "command": "vscode-wallpaper-engine.openSettings",
