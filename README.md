@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/visual-studio-marketplace/v/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 
-将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.0.11`。
+将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.1.0`。
 
 本插件通过在 VS Code 核心文件中注入代码，实现了真正的动态背景支持，并提供了强大的 UI 透明化控制功能，让你在享受动态壁纸的同时，依然保持高效的编码体验。
 
@@ -81,6 +81,12 @@
 
 - `vscode-wallpaper-engine.customCss`: 注入自定义 CSS 代码，用于微调界面样式。
 
+### 配置生效范围
+
+- 壁纸路径、壁纸 ID、服务器端口、透明化开关、透明化规则和基底颜色会写入 VS Code 设置。
+- Wallpaper Settings 会优先使用当前打开资源的配置作用域（工作区文件夹 > 工作区 > 用户），因此请在目标工作区中打开面板并保存规则。
+- 修改壁纸相关配置后，扩展会尝试同步服务器和 Workbench 注入；涉及端口、壁纸或注入状态的变更通常需要重载窗口。
+
 ## 🎮 使用指南
 
 ### 打开设置面板
@@ -127,14 +133,36 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 2. 确认日志中的服务健康检查、入口检查和 Workbench 注入均成功。
 3. 执行 `Developer: Reload Window`；VS Code 更新后可能覆盖注入，需要重新执行 `Set Wallpaper: 设置壁纸`。
 4. 检查 `vscode-wallpaper-engine.serverPort` 是否被其他进程占用。
-
-### 启动时一闪而过，随后变成黑色？
-
-启用 C/C++ Theme 时，保持 `vscode-wallpaper-engine.themeCompatibility` 为 `auto`。设置面板会显示当前主题兼容状态；若未被自动识别，可临时设为 `on` 并重新加载窗口。不要通过卸载主题扩展来规避问题。
+5. 若日志显示“设置成功”但重载后仍无壁纸，先执行 `Restore Wallpaper Changes: 还原壁纸修改`，确认还原验证通过后，再重新执行设置壁纸。
 
 ### 设置面板语言没有更新？
 
 在 Wallpaper Settings 顶部选择 `Auto`、`中文` 或 `English`。该值保存到用户级配置；直接修改 `vscode-wallpaper-engine.uiLanguage` 时，已打开的设置面板也会同步刷新。
+
+### 壁纸只在启动瞬间出现，随后变黑？
+
+这通常是主题扩展在 Workbench 完成加载后重新写入了不透明背景。已知冲突来源包括 `ms-vscode.cpptools-themes`（C/C++ Theme）。请保持 `themeCompatibility=auto`，必要时改为 `on` 并重载窗口；若仍然冲突，可暂时禁用该主题扩展验证。确认冲突后不需要修改壁纸文件。
+
+## 🛠️ 开发与发布
+
+```powershell
+npm install
+npm run check-types
+npm run lint
+npm test -- --runInBand
+npm run vsce-package
+```
+
+`npm run vsce-package` 会先执行生产构建，再在项目根目录生成 `vscode-wallpaper-engine-<version>.vsix`。发布前请确认 `package.json` 与 `package-lock.json` 版本一致，并使用 `git diff --check` 检查空白错误。仓库默认忽略 VSIX 文件；需要交付时可将产物归档到 `release/`，并记录 SHA-256。
+
+## 📁 项目结构
+
+- `src/extension.ts`: 扩展生命周期、命令注册、设置壁纸和还原流程。
+- `src/core/injector.ts`: Workbench HTML/JS 注入、CSP 本地来源补丁和沙箱 iframe 引导。
+- `src/core/server.ts`: 仅监听 `127.0.0.1` 的本地壁纸 HTTP 服务及健康检查接口。
+- `src/core/config-patcher.ts`: 透明化规则、主题兼容和托管配置备份。
+- `src/panels/setting-panel.ts`、`media/settings.*`: Wallpaper Settings 面板及中英文本地化。
+- `docs/COMMUNICATION.md`: Workbench、扩展宿主、本地服务与壁纸 iframe 的通信约定。
 
 ## ⚠️ 免责声明
 

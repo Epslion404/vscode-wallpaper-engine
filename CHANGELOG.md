@@ -16,6 +16,10 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 - 改进 Wallpaper Settings 规则表的筛选与回显体验，便于快速定位和调整透明化目标。
 
+### Documentation
+
+- README、通信机制文档和开发向导已同步到 `0.1.0` 的安装、排障、沙箱隔离、接口限制及打包流程。
+
 ## [0.0.13] - 2026-08-28
 
 ### Added

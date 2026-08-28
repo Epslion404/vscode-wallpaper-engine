@@ -1,115 +1,102 @@
-# VS Code Wallpaper Engine 通信机制文档
+# VS Code Wallpaper Engine 通信机制
 
-本文档详细说明了 `vscode-wallpaper-engine` 扩展中，VS Code 前端（Workbench）、壁纸服务（Server）与壁纸内容（Wallpaper）之间的通信架构。
+本文档描述扩展宿主、Workbench 注入脚本、本地壁纸服务和沙箱壁纸页面之间的边界与消息流。代码实现以 `src/extension.ts`、`src/core/injector.ts`、`src/core/server.ts` 和 `src/panels/setting-panel.ts` 为准。
 
-## 1. 核心架构
+## 1. 组件与安全边界
 
-整个系统由三个主要部分组成：
+系统由四个部分组成：
 
-1.  **Extension Host (后端)**: 运行在 VS Code 扩展进程中的 Node.js 代码。负责启动本地 HTTP 服务器、管理壁纸资源、以及修改 VS Code 的核心文件。
-2.  **Workbench (宿主环境)**: VS Code 的主窗口 (`workbench.html`)。通过注入的 JavaScript 代码运行壁纸容器。
-3.  **Wallpaper (壁纸)**: 运行在 Workbench 内部 `iframe` 中的 Web 内容。
+1. **Extension Host**：运行扩展宿主中的 Node.js 代码，负责生命周期、配置、透明化规则、本地服务器和 Workbench 文件修改。
+2. **Workbench 注入脚本**：运行在 VS Code 主窗口，用于创建壁纸容器、同步透明化 CSS 和向壁纸 iframe 发送运行时消息。
+3. **本地壁纸服务器**：由 Extension Host 启动，默认只监听 `127.0.0.1:23333`，提供壁纸入口、项目配置和健康检查接口。
+4. **壁纸 iframe**：使用 `sandbox="allow-scripts"` 加载 Web 壁纸入口。未授予 `allow-same-origin`，因此壁纸脚本不能读取或修改 Workbench DOM，也不能直接访问扩展宿主。
 
-## 2. 通信流程
+Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src` 和 `connect-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
 
-### 2.1 初始化与注入
+## 2. 初始化与壁纸加载
 
-1.  **启动服务**: 扩展激活时，`src/core/server.ts` 启动一个本地 HTTP 服务器（默认端口 23333）。
-2.  **代码注入**: `src/core/injector.ts` 修改 VS Code 安装目录下的 `workbench.html` 和 `workbench.desktop.main.js`。
-    - **CSP Patch**: 放宽 `Content-Security-Policy`，允许加载 `http://127.0.0.1:23333` 的资源。
-    - **JS Injection**: 注入一段引导脚本，负责创建壁纸容器和侧边栏。
+1. 扩展激活后读取配置，并按需要启动本地服务器。
+2. 设置壁纸命令扫描创意工坊目录中的 `project.json`。当前支持 `video`、`image` 和 `web`，原生 `scene` 类型会被诊断为不支持，不会作为可加载壁纸返回。
+3. 服务器启动后，扩展依次验证媒体、服务健康状态和 `/api/get-entry` 入口。
+4. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 `workbench.desktop.main.js`，最后请求窗口重载。
+5. 注入脚本创建 `#vscode-wallpaper-container` 和壁纸 iframe。Web 壁纸先显示加载状态，iframe `load` 事件触发后再显示内容。
+6. 视频和图片壁纸通过 VS Code 资源 URL 加载；Web 壁纸通过本地服务的 `/api/get-entry` 加载。
 
-### 2.2 壁纸加载机制
+## 3. 本地 HTTP 接口
 
-注入的 JavaScript (`injectJs` 函数生成的代码) 执行以下步骤：
+所有接口只用于本机 Workbench 与壁纸运行时通信。服务绑定回环地址；响应按接口需要设置 CORS，不能据此把服务视为可供局域网访问的通用文件服务器。
 
-1.  **健康检查 (Health Check)**:
+| 接口 | 用途 |
+| --- | --- |
+| `GET /ping` | 健康检查。普通请求返回 `200 pong`；切换壁纸时可返回一次 `205`，通知客户端重新加载 iframe。 |
+| `GET /status` | 返回服务是否运行、当前壁纸根目录和入口文件，用于端口复用检查。 |
+| `GET /config` | 返回当前 CSS 配置（例如 `customCss`、`themeCompatibility`），供注入脚本同步样式。 |
+| `GET /api/get-entry` | 返回视频、图片或 Web 壁纸的可加载入口 HTML。 |
+| `GET /project.json` | 合并当前壁纸及依赖目录的项目属性，供壁纸属性面板使用。 |
+| `GET /proxy?url=...` | 为壁纸兼容层代理公开网络资源。只接受 `http`/`https`，拒绝私网或回环地址、DNS 解析到私网的目标和重定向；单请求超时 10 秒，响应上限 10 MiB。 |
+| `GET /shutdown` | 本地服务接管时使用的关闭信号，不应由壁纸页面主动调用。 |
 
-    - 脚本会轮询 `http://127.0.0.1:23333/ping`。
-    - 如果服务器未就绪，会持续等待。
-    - 一旦收到 `200 OK` 或 `205 Reset Content`，视为服务已启动。
+文件请求会经过真实路径校验，只允许落在当前壁纸目录或已解析的依赖目录内；路径穿越、符号链接越界和目录外文件不会被返回。
 
-2.  **创建容器**:
+## 4. Workbench 与壁纸 iframe 消息
 
-    - 在 VS Code 界面顶层创建一个 `div` (`#vscode-wallpaper-container`)。
-    - 在其中创建一个 `iframe`。
+注入脚本会向 iframe 发送以下运行时消息。由于 `sandbox` iframe 使用 opaque origin，消息目标使用 `*`；消息只发送到扩展创建并持有引用的 iframe。
 
-3.  **加载内容**:
-    - `iframe` 使用 `sandbox="allow-scripts"`，直接加载本地服务的 `/api/get-entry` 入口。
-    - 壁纸内容与 Workbench 保持跨源隔离，不能访问宿主 DOM 或注入 Workbench 主脚本。
-    - 切换壁纸时仅更新 iframe 的入口地址，不把用户脚本拼入 Workbench。
+```ts
+{ type: 'UPDATE_PROPERTIES', data: { [key]: { value } } }
+{ type: 'PROPERTIES', data: { [key]: { value } } }
+{ type: 'AUDIO_TICK', data: { ...audioState } }
+```
 
-### 2.3 壁纸属性通信
+壁纸兼容层通过 `window.parent.postMessage` 回传音频源等请求；注入脚本只处理预定义消息类型，不把任意消息拼接进 Workbench 主脚本。
 
-Workbench 注入脚本和 Wallpaper Settings 可以将壁纸属性发送给沙箱 iframe；调试侧边栏默认关闭。
+## 5. 设置面板消息
 
-1.  **获取配置**:
+Wallpaper Settings 是独立 Webview。打开后先发送 `{ command: "ready" }`，Extension Host 返回当前状态：
 
-    - 侧边栏初始化时，请求 `http://127.0.0.1:23333/project.json`。
-    - 该文件包含壁纸支持的属性（如颜色、速度等）。
+- `{ type: "setupState", state }`：设置阶段、运行状态、成功或错误信息。
+- `{ type: "compatibilityStatus", state }`：C/C++ Theme 兼容模式、是否启用、命中原因和主题名称。
+- `{ type: "language", language, resolvedLanguage }`：配置值和 `auto` 解析后的界面语言。
 
-2.  **应用设置**:
-    - 当用户在侧边栏修改参数时，调用 `window.updateProp(key, value)`。
-    - 该函数通过 `postMessage` 向 `iframe` 发送消息：
-      ```javascript
-      iframe.contentWindow.postMessage(
-        {
-          type: "UPDATE_PROPERTIES",
-          data: { [key]: { value: val } },
-        },
-        "*"
-      );
-      ```
-    - 壁纸内部的脚本（通常是 Wallpaper Engine 兼容层）接收消息并更新效果。
+用户切换语言时发送：
 
-### 2.4 多实例与重载
+```ts
+{ command: 'setLanguage', language: 'auto' | 'zh-CN' | 'en-US' }
+```
 
-- **重载信号**: 如果服务器需要客户端刷新（例如切换了壁纸），`/ping` 接口会返回 `205` 状态码。客户端脚本检测到 `205` 后，会重新获取壁纸内容并刷新 `iframe`。
-- **多实例复用**: 新版服务器支持 `/status` 接口。启动时会检查端口是否被占用且路径是否一致，从而决定是复用现有服务还是重启服务。
+Host 会校验枚举值并写入用户级设置。透明化规则、开关和基底颜色则按当前资源作用域（工作区文件夹 > 工作区 > 用户）保存，并在写入后把后端确认值回传给面板。
 
-### 2.5 `/config` 与设置面板语言消息
+## 6. 刷新、重载与还原
 
-`GET /config` 返回 `{ customCss, themeCompatibility }`。Extension Host 会在当前主题变化或配置变化时更新这两个字段，Workbench 注入脚本据此幂等刷新 CSS。
+- 修改壁纸或服务器端口时，扩展会保存待确认事务，并在注入完成后请求 `workbench.action.reloadWindow`。
+- 重载后的激活流程会验证注入标记、服务健康和壁纸入口；任一项失败都会保留错误状态，便于重试或查看 `Wallpaper Engine` Output 日志。
+- 执行“还原壁纸修改”时，扩展会停止服务、移除 Workbench 注入、恢复 CSP、删除插件托管的透明化备份和持久化状态，再通过重载后的验证确认清理完成。
+- VS Code 更新可能覆盖 Workbench 文件。此时需要重新执行“设置壁纸”；若不再使用扩展，应先执行还原命令并等待验证通过，再卸载扩展。
 
-设置 Webview 启动后发送 `{ command: "ready" }`，Host 回复以下状态：
+## 7. 常见连接问题
 
-- `{ type: "setupState", state }`：设置壁纸的 idle/running/success/error 状态。
-- `{ type: "language", language, resolvedLanguage }`：用户配置值和 `auto` 解析后的实际语言。
-- `{ type: "compatibilityStatus", state }`：主题兼容模式、是否启用、命中原因和当前主题。
+1. **服务未启动或端口冲突**：查看 `Wallpaper Engine` Output 中的 `/status` 和监听错误，修改 `serverPort` 后重新设置壁纸。
+2. **CSP 或注入标记缺失**：VS Code 更新后核心文件可能恢复原状，重新执行设置壁纸即可重新补丁。
+3. **启动瞬间可见、随后变黑**：检查 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题，保持 `themeCompatibility=auto`，必要时临时设为 `on` 并重载窗口。
+4. **属性面板无内容**：确认当前壁纸包含可解析的 `project.json`，并检查本地服务是否能访问 `/project.json`。
 
-用户切换语言时发送 `{ command: "setLanguage", language: "auto" | "zh-CN" | "en-US" }`，Host 严格校验并保存到用户级配置，再广播新的解析语言。未知语言值会被拒绝，不会写入配置。
-
-## 3. 常见连接问题排查
-
-如果出现“设置项连接不到服务器”的情况，通常是以下原因：
-
-1.  **端口冲突**: 23333 端口被其他程序占用，导致服务未成功启动。
-2.  **CSP 拦截**: `workbench.html` 的 CSP 补丁未生效（可能是 VS Code 更新覆盖了文件），导致浏览器阻止了对 `http://127.0.0.1` 的请求。
-3.  **服务重启中**: 在多窗口切换时，旧服务正在关闭，新服务尚未就绪，此时前端发起的 `project.json` 请求可能失败。
-
-## 4. 架构图示
+## 8. 时序图
 
 ```mermaid
 sequenceDiagram
-    participant Ext as Extension (Node.js)
-    participant WB as Workbench (Injected JS)
-    participant IF as Iframe (Wallpaper)
+    participant Ext as Extension Host
+    participant WB as Workbench 注入脚本
+    participant S as 127.0.0.1 壁纸服务
+    participant IF as sandbox iframe
 
-    Ext->>Ext: Start HTTP Server (23333)
-    Ext->>WB: Inject JS & Patch CSP
-
-    loop Health Check
-        WB->>Ext: GET /ping
-        Ext-->>WB: 200 OK
-    end
-
-    WB->>Ext: GET /api/get-entry
-    Ext-->>WB: Wallpaper HTML
-    WB->>IF: Render HTML
-
-    WB->>Ext: GET /project.json (Property UI Init)
-    Ext-->>WB: JSON Config
-
-    Note over WB, IF: User changes settings
-    WB->>IF: postMessage({ type: 'UPDATE_PROPERTIES' })
+    Ext->>S: 启动并监听端口
+    Ext->>WB: 注入引导脚本与受限 CSP 来源
+    WB->>S: GET /ping
+    S-->>WB: 200 pong
+    WB->>S: GET /api/get-entry
+    S-->>WB: 壁纸入口 HTML
+    WB->>IF: sandbox 加载入口
+    WB->>S: GET /config /project.json
+    S-->>WB: CSS 与壁纸属性
+    WB->>IF: postMessage(UPDATE_PROPERTIES / AUDIO_TICK)
 ```

@@ -1,48 +1,101 @@
-# Welcome to your VS Code Extension
+# 开发与维护指南
 
-## What's in the folder
+本文档面向 `vscode-wallpaper-engine` 的开发者和维护者。用户安装与故障排查请先阅读 [README.md](README.md)。
 
-* This folder contains all of the files necessary for your extension.
-* `package.json` - this is the manifest file in which you declare your extension and command.
-  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
-* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
-  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
-  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
+## 环境准备
 
-## Setup
+1. 安装 VS Code（需满足 `package.json` 中声明的 VS Code 引擎版本）。
+2. 安装 Node.js 和 npm。
+3. 克隆仓库并安装依赖：
 
-* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
+   ```powershell
+   npm install
+   ```
 
+## 代码结构
 
-## Get up and running straight away
+- `src/extension.ts`：扩展激活、命令、配置监听、设置/还原事务。
+- `src/core/injector.ts`：Workbench HTML/JavaScript 注入、CSP 来源补丁和沙箱 iframe。
+- `src/core/server.ts`：本地壁纸 HTTP 服务、入口和属性接口。
+- `src/core/scanner.ts`：创意工坊 `project.json` 扫描与诊断。
+- `src/core/config-patcher.ts`：透明化规则、主题兼容和托管值备份。
+- `src/panels/setting-panel.ts`、`media/settings.*`：Wallpaper Settings Webview 和本地化文本。
+- `src/test/`：单元测试与集成测试。
 
-* Press `F5` to open a new window with your extension loaded.
-* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
-* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
-* Find output from your extension in the debug console.
+## 日常开发
 
-## Make changes
+类型检查、Lint 和开发构建：
 
-* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
-* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
+```powershell
+npm run check-types
+npm run lint
+npm run compile
+```
 
+监听模式：
 
-## Explore the API
+```powershell
+npm run watch
+```
 
-* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
+按 `F5` 启动 Extension Development Host，然后从命令面板执行 Wallpaper Engine 命令。扩展输出位于 `View: Toggle Output` 的 `Wallpaper Engine` 通道。
 
-## Run tests
+## 测试
 
-* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
-* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
-* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
-* See the output of the test result in the Test Results view.
-* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
-  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
-  * You can create folders inside the `test` folder to structure your tests any way you want.
+运行完整测试套件：
 
-## Go further
+```powershell
+npm test -- --runInBand
+```
 
-* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
-* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
-* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
+提交前至少执行：
+
+```powershell
+npm run check-types
+npm run lint
+npm test -- --runInBand
+git diff --check
+```
+
+修改注入、服务器安全、扫描器或卸载流程时，应同步补充 `src/test/` 中对应的回归测试。
+
+## 打包与发布
+
+1. 修改 `package.json` 的版本号，并同步 `package-lock.json` 顶层版本和 `packages[""]`.version。
+2. 在 `CHANGELOG.md` 顶部记录版本、日期和用户可见变更。
+3. 执行：
+
+   ```powershell
+   npm run vsce-package
+   ```
+
+   该命令会运行 `vscode:prepublish`，依次执行生产构建、类型检查和 Lint，然后在项目根目录生成 `vscode-wallpaper-engine-<version>.vsix`。
+4. 交付产物可移动到 `release/` 并计算 SHA-256：
+
+   ```powershell
+   Move-Item .\vscode-wallpaper-engine-<version>.vsix .\release\
+   Get-FileHash -Algorithm SHA256 .\release\vscode-wallpaper-engine-<version>.vsix
+   ```
+
+   VSIX 默认被 `.gitignore` 排除，源码提交不应强制加入二进制文件。
+5. 提交并推送前检查：
+
+   ```powershell
+   git status --short
+   git log -1 --oneline
+   git push origin master
+   ```
+
+如网络环境需要代理，在 Git 命令中显式设置 `http.proxy` 和 `https.proxy`，不要把代理凭据写入仓库配置或文档。
+
+## 修改 Workbench 注入时的注意事项
+
+- 只向 VS Code 原 CSP 的 `frame-src` 和 `connect-src` 增加当前回环端口，不得恢复全开放策略。
+- Web 壁纸 iframe 必须保持 `sandbox="allow-scripts"`，不要添加 `allow-same-origin`。
+- 文件服务必须使用真实路径边界校验，不能用简单的字符串前缀判断路径是否安全。
+- 还原流程需要清理注入标记、CSP 来源、插件托管透明化备份、本地服务和持久化状态，并覆盖重载后的验证。
+- 修改配置键时同步更新 `src/config`、`src/configuration-change.ts`、`package.json` 和相关测试。
+
+## 版本记录
+
+当前版本为 `0.1.0`。用户可见变更统一记录在 [CHANGELOG.md](CHANGELOG.md)；通信协议和本地接口记录在 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)。
