@@ -35,9 +35,9 @@
     - 在其中创建一个 `iframe`。
 
 3.  **加载内容**:
-    - `iframe` 的 `srcdoc` 被设置为一段包含引导逻辑的 HTML。
-    - 该引导逻辑通过 `fetch('http://127.0.0.1:23333/api/get-entry')` 获取实际的壁纸 HTML 内容。
-    - 获取到的 HTML 被写入 `document`，壁纸开始运行。
+    - `iframe` 使用 `sandbox="allow-scripts"`，直接加载本地服务的 `/api/get-entry` 入口。
+    - 壁纸内容与 Workbench 保持跨源隔离，不能访问宿主 DOM 或注入 Workbench 主脚本。
+    - 切换壁纸时仅更新 iframe 的入口地址，不把用户脚本拼入 Workbench。
 
 ### 2.3 设置面板 (Sidebar) 通信
 
