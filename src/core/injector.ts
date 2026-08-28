@@ -8,6 +8,9 @@ import { WallpaperType } from './types';
 // --- 常量定义 ---
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
+const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
+const JS_INJECTION_VERSION = '2';
+const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
 const CSP_MARKER_START = '<!-- VSCode-Wallpaper-Injection-Start -->';
@@ -89,6 +92,25 @@ function getWallpaperIframeSandbox(): string {
     return 'allow-scripts';
 }
 
+/**
+ * 透明化 Workbench 的根层和现代 UI shell，避免其不透明背景覆盖底层壁纸。
+ * 具体编辑器、侧边栏和面板颜色仍由 transparencyRules 控制。
+ */
+export function getWorkbenchTransparencyCss(): string {
+    return [
+        'html, body { background: transparent !important; }',
+        'div[role="application"] { background: transparent !important; }',
+        '.monaco-workbench {',
+        '  background: transparent !important;',
+        '  --modern-ui-shell-background: transparent !important;',
+        '}',
+        '.monaco-workbench.floating-panels,',
+        '.monaco-workbench.floating-panels > .monaco-grid-view,',
+        '.monaco-grid-view { background: transparent !important; }',
+        '.active.empty { background: transparent !important; }',
+    ].join(' ');
+}
+
 function addSourceToDirective(content: string, directive: string, source: string): string {
     const directivePattern = new RegExp(`(${directive}\\s+)([^;]*)(;)`, 'i');
     return content.replace(directivePattern, (_match, prefix: string, sources: string, suffix: string) => {
@@ -124,7 +146,7 @@ export function isPatched(): boolean {
     if (!jsPath) { return false; }
     try {
         const js = fs.readFileSync(jsPath, 'utf-8');
-        return js.includes('/* [VSCode-Wallpaper-Injection-Start] */');
+        return hasCurrentInjection(js);
     } catch {
         return false;
     }
@@ -189,6 +211,12 @@ export async function restoreWorkbench() {
             { cause: error },
         );
     }
+}
+
+/** 仅将包含当前注入协议版本的 Workbench 文件视为可复用补丁。 */
+export function hasCurrentInjection(content: string): boolean {
+    return content.includes(JS_INJECTION_MARKER)
+        && content.includes(JS_INJECTION_VERSION_MARKER);
 }
 
 /**
@@ -319,6 +347,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
 
     const jsInjection = `
 /* [VSCode-Wallpaper-Injection-Start] */
+${JS_INJECTION_VERSION_MARKER}
 (function() {
     try {
         const oldContainer = document.getElementById('vscode-wallpaper-container');
@@ -342,7 +371,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
 
         // [Fix] Force transparent background for workbench container
         const baseStyle = document.createElement('style');
-        baseStyle.textContent = 'div[role="application"] { background: transparent !important; } .active.empty { background: transparent !important; }';
+        baseStyle.textContent = ${JSON.stringify(getWorkbenchTransparencyCss())};
         document.head.appendChild(baseStyle);
 
         // Inject Transparency CSS
@@ -549,7 +578,7 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
     await saveFilePrivileged(jsPath, raw + jsInjection);
     ensureInjectionWritten(
         fs.readFileSync(jsPath, 'utf-8'),
-        '/* [VSCode-Wallpaper-Injection-Start] */',
+        JS_INJECTION_MARKER,
         jsPath,
     );
 }

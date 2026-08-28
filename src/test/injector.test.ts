@@ -4,6 +4,8 @@ import * as path from 'path';
 import {
     ensureInjectionWritten,
     executeInjection,
+    getWorkbenchTransparencyCss,
+    hasCurrentInjection,
     runInjectionStep,
     WorkbenchInjectionError,
 } from '../core/injector';
@@ -30,6 +32,16 @@ suite('Injector security boundary', () => {
         assert.match(source, /addSourceToDirective\(restrictedContent, 'connect-src', serverOrigin\)/);
     });
 
+    test('Workbench root layers remain transparent so the wallpaper can stay behind the UI', () => {
+        const css = getWorkbenchTransparencyCss();
+        assert.match(css, /html\s*,\s*body/);
+        assert.match(css, /\.monaco-workbench/);
+        assert.match(css, /\.monaco-grid-view/);
+        assert.match(css, /--modern-ui-shell-background:\s*transparent\s*!important/);
+        assert.match(css, /div\[role="application"\]/);
+        assert.match(css, /background:\s*transparent\s*!important/);
+    });
+
     test('Workbench restoration delegates user feedback to the extension host', () => {
         assert.ok(!source.includes('showInformationMessage'));
         assert.ok(!source.includes('showErrorMessage'));
@@ -44,6 +56,17 @@ suite('Injector security boundary', () => {
                 'workbench.desktop.main.js',
             );
         });
+    });
+
+    test('outdated Workbench injections are not treated as current', () => {
+        assert.strictEqual(
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:1] */'),
+            false,
+        );
+        assert.strictEqual(
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:2] */'),
+            true,
+        );
     });
 
     test('failed write verification reports the target path', () => {

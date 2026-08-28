@@ -4,6 +4,14 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.10] - 2026-08-28
+
+### Fixed
+
+- 修复现代 UI shell 的 `.monaco-grid-view` 不透明背景覆盖视频壁纸，导致启动瞬间可见、加载完成后变黑。
+- 注入时强制覆盖 `--modern-ui-shell-background` 并保持 Workbench 根层透明。
+- 增加注入协议版本标记，升级后自动迁移旧版 Workbench 注入。
+
 ## [0.0.9] - 2026-08-28
 
 ### Fixed
