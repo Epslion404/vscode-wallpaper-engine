@@ -42,6 +42,7 @@ suite('Transparency patch target helpers', () => {
     test('exposes unique descriptive rules for every supported transparency key', () => {
         assert.ok(TRANSPARENCY_COLOR_RULES.length > 100);
         assert.strictEqual(new Set(TRANSPARENT_COLOR_KEYS).size, TRANSPARENT_COLOR_KEYS.length);
+        assert.ok(TRANSPARENT_COLOR_KEYS.includes('editorGutter.background'));
         assert.deepStrictEqual(
             TRANSPARENCY_COLOR_RULES.map(rule => rule.key),
             TRANSPARENT_COLOR_KEYS,
