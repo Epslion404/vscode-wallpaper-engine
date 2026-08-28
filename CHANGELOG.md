@@ -4,6 +4,13 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.13] - 2026-08-28
+
+### Added
+
+- 扩展透明化规则列表，覆盖编辑器、标签页、侧边栏、活动栏、面板、状态栏、弹窗、列表树、最小地图、终端、设置、聊天和差异编辑器等区域。
+- 透明化规则名称改为“位置描述（键名）”，并支持中英文切换。
+
 ## [0.0.12] - 2026-08-28
 
 ### Fixed
@@ -11,7 +18,6 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - 修复 Wallpaper Settings 透明化规则在工作区文件夹作用域下保存后回显旧值的问题。
 - 修复切换到设置页或其他编辑器后，面板重开因活动资源变化而读取旧规则的问题。
 - 增大透明化规则滑块，并在窄窗口中自适应显示。
-- 扩展透明化规则列表，覆盖编辑器、标签页、侧边栏、活动栏、面板、状态栏、弹窗、列表树、最小地图、终端、设置、聊天和差异编辑器等区域；列表显示为“位置描述（键名）”。
 
 ## [0.0.11] - 2026-08-28
 
