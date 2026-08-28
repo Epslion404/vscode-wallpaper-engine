@@ -4,6 +4,14 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.6] - 2026-08-28
+
+### Fixed
+
+- Hardened wallpaper loading, local file serving, proxy requests, and Workbench injection boundaries.
+- Improved wallpaper setup progress, failure recovery, refresh feedback, and settings-page status reporting.
+- Added safer configuration validation, transparency restoration, scanner diagnostics, and reproducible packaging.
+
 ## [0.0.5] - 2025-12-31
 
 ### Fixed
