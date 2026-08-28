@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WallpaperServer } from '../core/server';
-import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch } from '../core/config-patcher';
+import { TRANSPARENT_COLOR_KEYS, applyTransparencyPatch, getPreferredConfigurationTarget, getPreferredTransparencyTarget } from '../core/config-patcher';
 import { WallpaperSetupViewState } from '../core/wallpaper-setup';
 import { toUserErrorReason } from '../core/user-message';
 import { isUiLanguage, resolveUiLanguage, UiLanguage } from './localization';
@@ -10,6 +10,14 @@ import { ThemeCompatibilityMode, ThemeCompatibilityDecision } from '../core/them
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+function getSettingsResource(): vscode.Uri | undefined {
+    return vscode.window.activeTextEditor?.document.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+}
+
+function getSettingsConfiguration(): vscode.WorkspaceConfiguration {
+    return vscode.workspace.getConfiguration('vscode-wallpaper-engine', getSettingsResource());
+}
 
 export type SettingsPanelMessage =
     | { command: 'ready' }
@@ -200,12 +208,12 @@ export class SettingsPanel {
                 } else if (message.command === 'ready') {
                     await webview.postMessage({ type: 'setupState', state: SettingsPanel.setupState });
                     await webview.postMessage({ type: 'compatibilityStatus', state: SettingsPanel.compatibilityState });
-                    const configured = vscode.workspace.getConfiguration('vscode-wallpaper-engine').get<unknown>('uiLanguage');
+                    const configured = getSettingsConfiguration().get<unknown>('uiLanguage');
                     const language = isUiLanguage(configured) ? configured : 'auto';
                     await webview.postMessage({ type: 'language', language, resolvedLanguage: resolveUiLanguage(language, vscode.env.language) });
                 } else if (message.command === 'setLanguage') {
                     try {
-                        await vscode.workspace.getConfiguration('vscode-wallpaper-engine')
+                        await getSettingsConfiguration()
                             .update('uiLanguage', message.language, vscode.ConfigurationTarget.Global);
                         SettingsPanel.publishLanguage(message.language);
                     } catch (error: unknown) {
@@ -243,7 +251,7 @@ export class SettingsPanel {
                 } else if (message.command === 'editCustomCss') {
                     await vscode.commands.executeCommand('vscode-wallpaper-engine.editCustomCss');
                 } else if (message.command === 'updateCss') {
-                    const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
+                    const config = getSettingsConfiguration();
 
                     try {
                         await config.update('customCss', message.customCss, vscode.ConfigurationTarget.Global);
@@ -266,23 +274,22 @@ export class SettingsPanel {
                         await vscode.window.showWarningMessage('自定义样式已保存，但壁纸客户端未确认刷新，请手动刷新壁纸。');
                     }
                 } else if (message.command === 'updateTransparencyRules') {
-                    const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
+                    const config = getSettingsConfiguration();
                     try {
-                        const inspect = config.inspect('transparencyRules');
-                        const target = (inspect && inspect.workspaceValue !== undefined) ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
-                        
+                        const target = getPreferredTransparencyTarget();
                         await config.update('transparencyRules', message.rules, target);
                         await applyTransparencyPatch(target);
+                        const persistedRules = config.get<Record<string, number>>('transparencyRules') || {};
+                        await this._panel.webview.postMessage({ type: 'transparencyRules', rules: persistedRules });
                         await vscode.window.showInformationMessage('透明化规则已更新。');
                     } catch (error: unknown) {
                         console.error('[Panel] Failed to update transparency rules:', error);
                         await vscode.window.showErrorMessage(`更新透明化规则失败：${toUserErrorReason(error)}`);
                     }
                 } else if (message.command === 'toggleTransparency') {
-                    const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
+                    const config = getSettingsConfiguration();
                     try {
-                        const inspect = config.inspect('transparencyEnabled');
-                        const target = (inspect && inspect.workspaceValue !== undefined) ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+                        const target = getPreferredConfigurationTarget('transparencyEnabled');
 
                         await config.update('transparencyEnabled', message.enabled, target);
                         await applyTransparencyPatch(target);
@@ -292,10 +299,9 @@ export class SettingsPanel {
                         await vscode.window.showErrorMessage(`切换透明化失败：${toUserErrorReason(error)}`);
                     }
                 } else if (message.command === 'updateTransparencyBaseColor') {
-                    const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
+                    const config = getSettingsConfiguration();
                     try {
-                        const inspect = config.inspect('transparencyBaseColor');
-                        const target = (inspect && inspect.workspaceValue !== undefined) ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+                        const target = getPreferredConfigurationTarget('transparencyBaseColor');
 
                         await config.update('transparencyBaseColor', message.color, target);
                         await applyTransparencyPatch(target);
@@ -312,7 +318,7 @@ export class SettingsPanel {
     }
 
     private _getHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri) {
-        const config = vscode.workspace.getConfiguration('vscode-wallpaper-engine');
+        const config = getSettingsConfiguration();
         const port = config.get<number>('serverPort') || 23333;
         const customCss = config.get<string>('customCss') || '';
         const transparencyRules = config.get<Record<string, number>>('transparencyRules') || {};

@@ -4,6 +4,13 @@ All notable changes to the "vscode-wallpaper-engine" extension will be documente
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.12] - 2026-08-28
+
+### Fixed
+
+- 修复 Wallpaper Settings 透明化规则在工作区文件夹作用域下保存后回显旧值的问题。
+- 增大透明化规则滑块，并在窄窗口中自适应显示。
+
 ## [0.0.11] - 2026-08-28
 
 ### Added
@@ -15,6 +22,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Fixed
 
 - 修复启用 `ms-vscode.cpptools-themes` 后壁纸在 Workbench 完成加载时被黑色背景覆盖的问题。
+- 修复工作区文件夹级透明化规则被错误写入用户级配置，导致切换 Wallpaper Settings 后规则恢复旧值的问题。
+- 保存透明化规则后，设置面板立即使用后端确认的持久化值重绘；透明化规则滑块宽度增至 200px，并在窄窗口中自适应。
 - 统一设置过程常见状态、错误和固定控件的中英文反馈。
 
 ### Documentation

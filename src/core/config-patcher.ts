@@ -9,19 +9,21 @@ import {
 } from './transparency-state';
 
 const TRANSPARENCY_BACKUP_KEY = 'transparencyColorBackups';
+const TRANSPARENCY_WORKSPACE_FOLDER_BACKUP_KEY = 'transparencyColorBackups.workspaceFolder';
 let globalState: vscode.Memento | undefined;
 let workspaceState: vscode.Memento | undefined;
 
 export type TransparencyPatchTarget =
     | vscode.ConfigurationTarget.Global
-    | vscode.ConfigurationTarget.Workspace;
+    | vscode.ConfigurationTarget.Workspace
+    | vscode.ConfigurationTarget.WorkspaceFolder;
 
 /** 将单一作用域参数规范化为有序、去重的作用域列表。 */
 export function normalizeTransparencyTargets(
     target?: TransparencyPatchTarget | readonly TransparencyPatchTarget[]
 ): TransparencyPatchTarget[] {
     const targets = target === undefined
-        ? [vscode.ConfigurationTarget.Global, vscode.ConfigurationTarget.Workspace]
+        ? [vscode.ConfigurationTarget.Global, vscode.ConfigurationTarget.Workspace, vscode.ConfigurationTarget.WorkspaceFolder]
         : Array.isArray(target) ? target : [target];
     return [...new Set(targets)];
 }
@@ -31,11 +33,12 @@ export function initializeTransparencyState(context: vscode.ExtensionContext): v
     workspaceState = context.workspaceState;
 }
 
-/** 返回两个配置作用域是否仍存在插件托管的颜色备份。 */
+/** 返回所有配置作用域是否仍存在插件托管的颜色备份。 */
 export function hasTransparencyBackups(): boolean {
     const globalBackups = globalState?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
     const workspaceBackups = workspaceState?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
-    return Object.keys(globalBackups).length > 0 || Object.keys(workspaceBackups).length > 0;
+    const workspaceFolderBackups = workspaceState?.get<ManagedColorBackups>(TRANSPARENCY_WORKSPACE_FOLDER_BACKUP_KEY) || {};
+    return Object.keys(globalBackups).length > 0 || Object.keys(workspaceBackups).length > 0 || Object.keys(workspaceFolderBackups).length > 0;
 }
 
 // 【透明化目标列表】所有可能遮挡壁纸的 UI 元素 Key
@@ -91,25 +94,26 @@ export const TRANSPARENT_COLOR_KEYS = [
 
 /**
  * 自动将 VS Code UI 关键元素的背景色设置为完全透明。
- * @param target 目标配置作用域 (Global 或 Workspace)
+ * @param target 目标配置作用域 (Global、Workspace 或 WorkspaceFolder)
  */
-export async function applyTransparencyPatch(target: TransparencyPatchTarget = vscode.ConfigurationTarget.Global) {
-    const config = vscode.workspace.getConfiguration();
+export async function applyTransparencyPatch(target?: TransparencyPatchTarget) {
+    const resolvedTarget = target ?? getPreferredTransparencyTarget();
+    const config = vscode.workspace.getConfiguration(undefined, getConfigurationResource());
     const enabled = config.get<boolean>('vscode-wallpaper-engine.transparencyEnabled') ?? true;
 
     if (!enabled) {
-        await removeTransparencyPatch(target);
+        await removeTransparencyPatch(resolvedTarget);
         return;
     }
 
     const rules = config.get<{[key: string]: number}>('vscode-wallpaper-engine.transparencyRules') || {};
 
     // 1. 获取现有颜色自定义设置
-    const existingCustomizations = getTargetCustomizations(config, target);
+    const existingCustomizations = getTargetCustomizations(config, resolvedTarget);
 
     // logging 
     console.log("[CUSTOM COLOR] Existing Customizations:", existingCustomizations);
-    console.log("[CUSTOM COLOR] Managed target:", target);
+    console.log("[CUSTOM COLOR] Managed target:", resolvedTarget);
 
     // 获取当前主题类型 (Light/Dark)
     const isLightTheme = vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Light;
@@ -179,20 +183,21 @@ export async function applyTransparencyPatch(target: TransparencyPatchTarget = v
         }
     }
 
-    const state = getState(target);
-    const backups = state?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    const state = getState(resolvedTarget);
+    const backupKey = getBackupKey(resolvedTarget);
+    const backups = state?.get<ManagedColorBackups>(backupKey) || {};
     const result = applyManagedColors(existingCustomizations, desiredCustomizations, backups);
 
     // 4. 检查是否有变更 (避免重复更新导致闪烁或死循环)
     if (JSON.stringify(existingCustomizations) === JSON.stringify(result.customizations)) {
-        await state?.update(TRANSPARENCY_BACKUP_KEY, result.backups);
+        await state?.update(backupKey, result.backups);
         return;
     }
 
     // 5. 更新设置
     try {
-        await config.update('workbench.colorCustomizations', result.customizations, target);
-        await state?.update(TRANSPARENCY_BACKUP_KEY, result.backups);
+        await config.update('workbench.colorCustomizations', result.customizations, resolvedTarget);
+        await state?.update(backupKey, result.backups);
         vscode.window.setStatusBarMessage('✅ UI Transparency Updated', 2000);
     } catch (error) {
         vscode.window.showErrorMessage('❌ 无法自动修改 settings.json。');
@@ -202,7 +207,7 @@ export async function applyTransparencyPatch(target: TransparencyPatchTarget = v
 
 /**
  * 移除我们设置的所有透明度规则。
- * 未指定作用域时会清理 Global 与 Workspace；传入单个作用域可用于
+ * 未指定作用域时会清理 Global、Workspace 与 WorkspaceFolder；传入单个作用域可用于
  * 设置变更回滚等局部操作。
  */
 export async function removeTransparencyPatch(
@@ -235,23 +240,54 @@ export class TransparencyPatchRemovalError extends Error {
     }
 }
 
+/** 选择当前资源实际使用的规则配置作用域，避免 Global 写入被文件夹级设置覆盖。 */
+export function getPreferredTransparencyTarget(): TransparencyPatchTarget {
+    return getPreferredConfigurationTarget('transparencyRules');
+}
+
+/** 读取指定扩展配置的最高优先级作用域，支持工作区文件夹设置。 */
+export function getPreferredConfigurationTarget(section: string): TransparencyPatchTarget {
+    const resource = getConfigurationResource();
+    const inspect = vscode.workspace
+        .getConfiguration('vscode-wallpaper-engine', resource)
+        .inspect(section);
+    if (inspect?.workspaceFolderValue !== undefined) {
+        return vscode.ConfigurationTarget.WorkspaceFolder;
+    }
+    if (inspect?.workspaceValue !== undefined) {
+        return vscode.ConfigurationTarget.Workspace;
+    }
+    return vscode.ConfigurationTarget.Global;
+}
+
 async function removeTransparencyPatchForTarget(target: TransparencyPatchTarget): Promise<void> {
-    const config = vscode.workspace.getConfiguration();
+    const config = vscode.workspace.getConfiguration(undefined, getConfigurationResource());
     const existingCustomizations = getTargetCustomizations(config, target);
     const state = getState(target);
-    const backups = state?.get<ManagedColorBackups>(TRANSPARENCY_BACKUP_KEY) || {};
+    const backupKey = getBackupKey(target);
+    const backups = state?.get<ManagedColorBackups>(backupKey) || {};
     const restoredCustomizations = restoreManagedColors(existingCustomizations, backups);
     const finalSettings = Object.keys(restoredCustomizations).length === 0 ? undefined : restoredCustomizations;
 
     if (Object.keys(backups).length > 0) {
         await config.update('workbench.colorCustomizations', finalSettings, target);
-        await state?.update(TRANSPARENCY_BACKUP_KEY, undefined);
+        await state?.update(backupKey, undefined);
         vscode.window.setStatusBarMessage('UI Transparency Removed', 2000);
     }
 }
 
 function getState(target: vscode.ConfigurationTarget): vscode.Memento | undefined {
-    return target === vscode.ConfigurationTarget.Workspace ? workspaceState : globalState;
+    return target === vscode.ConfigurationTarget.Global ? globalState : workspaceState;
+}
+
+function getBackupKey(target: TransparencyPatchTarget): string {
+    return target === vscode.ConfigurationTarget.WorkspaceFolder
+        ? TRANSPARENCY_WORKSPACE_FOLDER_BACKUP_KEY
+        : TRANSPARENCY_BACKUP_KEY;
+}
+
+function getConfigurationResource(): vscode.Uri | undefined {
+    return vscode.window.activeTextEditor?.document.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
 }
 
 function getTargetCustomizations(
@@ -259,6 +295,9 @@ function getTargetCustomizations(
     target: vscode.ConfigurationTarget
 ): ColorCustomizations {
     const inspected = config.inspect<ColorCustomizations>('workbench.colorCustomizations');
+    if (target === vscode.ConfigurationTarget.WorkspaceFolder) {
+        return inspected?.workspaceFolderValue || {};
+    }
     if (target === vscode.ConfigurationTarget.Workspace) {
         return inspected?.workspaceValue || {};
     }

@@ -128,6 +128,10 @@ window.addEventListener("message", (event) => {
   if (event.data && event.data.type === "compatibilityStatus") {
     renderCompatibilityStatus(event.data.state);
   }
+  if (event.data && event.data.type === "transparencyRules") {
+    window.transparencyRules = event.data.rules || {};
+    renderTransparencyRules();
+  }
 });
 
 languageSelect?.addEventListener("change", () => {
@@ -542,7 +546,8 @@ function renderTransparencyRules() {
     slider.max = "1";
     slider.step = "0.01";
     slider.value = rules[key] !== undefined ? rules[key] : 0; // Default 0 (Transparent)
-    slider.style.width = "100px";
+    slider.style.width = "200px";
+    slider.style.maxWidth = "45vw";
 
     // Value Display
     const valDisplay = document.createElement("span");
