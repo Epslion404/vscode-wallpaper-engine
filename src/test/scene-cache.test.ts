@@ -8,6 +8,7 @@ import {
     createSceneSourceFingerprint,
     DEFAULT_SCENE_RECORDING_SECONDS,
     findLatestValidSceneCache,
+    isSceneCacheManifest,
     parseSceneRecordingDuration,
     SceneRecordingProfile,
     SceneSource
@@ -21,7 +22,7 @@ suite('Scene Cache Test Suite', () => {
         width: 1920,
         height: 1080,
         fps: 30,
-        codec: 'libvpx-vp9'
+        codec: 'libx264'
     };
 
     setup(async () => {
@@ -53,6 +54,37 @@ suite('Scene Cache Test Suite', () => {
         }
     });
 
+    test('accepts only the H.264 MP4 cache contract used by Workbench playback', () => {
+        const common = {
+            wallpaperId: '2076546001',
+            cacheKey: 'cache-key',
+            source: {
+                projectSize: 10,
+                projectMtimeMs: 20,
+                sourceSize: 30,
+                sourceMtimeMs: 40
+            },
+            durationSeconds: 30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            createdAt: '2026-08-29T00:00:00.000Z'
+        };
+
+        assert.strictEqual(isSceneCacheManifest({
+            ...common,
+            version: 2,
+            codec: 'libx264',
+            outputFileName: 'cache.mp4'
+        }), true);
+        assert.strictEqual(isSceneCacheManifest({
+            ...common,
+            version: 1,
+            codec: 'libvpx-vp9',
+            outputFileName: 'cache.webm'
+        }), false);
+    });
+
     test('commits and finds a valid cache entry', async () => {
         const cacheRoot = path.join(tempDir, 'cache');
         const target = await createSceneCacheTarget(cacheRoot, source, profile, 'operation-1');
@@ -63,7 +95,8 @@ suite('Scene Cache Test Suite', () => {
 
         assert.strictEqual(found?.videoPath, committed.videoPath);
         assert.strictEqual(found?.manifest.durationSeconds, 30);
-        assert.strictEqual(found?.manifest.codec, 'libvpx-vp9');
+        assert.strictEqual(found?.manifest.codec, 'libx264');
+        assert.match(found?.manifest.outputFileName ?? '', /\.mp4$/);
     });
 
     test('source changes invalidate an existing cache', async () => {

@@ -5,6 +5,8 @@ import * as path from 'path';
 export const DEFAULT_SCENE_RECORDING_SECONDS = 30;
 export const MIN_SCENE_RECORDING_SECONDS = 1;
 export const MAX_SCENE_RECORDING_SECONDS = 300;
+export const SCENE_CACHE_VERSION = 2;
+export const SCENE_VIDEO_CODEC = 'libx264' as const;
 
 export interface SceneSource {
     wallpaperId: string;
@@ -17,7 +19,7 @@ export interface SceneRecordingProfile {
     width: number;
     height: number;
     fps: number;
-    codec: 'libvpx-vp9';
+    codec: typeof SCENE_VIDEO_CODEC;
 }
 
 export interface SceneSourceFingerprint {
@@ -28,7 +30,7 @@ export interface SceneSourceFingerprint {
 }
 
 export interface SceneCacheManifest {
-    version: 1;
+    version: typeof SCENE_CACHE_VERSION;
     wallpaperId: string;
     cacheKey: string;
     source: SceneSourceFingerprint;
@@ -36,7 +38,7 @@ export interface SceneCacheManifest {
     width: number;
     height: number;
     fps: number;
-    codec: 'libvpx-vp9';
+    codec: typeof SCENE_VIDEO_CODEC;
     createdAt: string;
     outputFileName: string;
 }
@@ -78,7 +80,7 @@ function isSourceFingerprint(value: unknown): value is SceneSourceFingerprint {
 
 export function isSceneCacheManifest(value: unknown): value is SceneCacheManifest {
     return isRecord(value)
-        && value.version === 1
+        && value.version === SCENE_CACHE_VERSION
         && typeof value.wallpaperId === 'string'
         && value.wallpaperId.length > 0
         && typeof value.cacheKey === 'string'
@@ -88,11 +90,11 @@ export function isSceneCacheManifest(value: unknown): value is SceneCacheManifes
         && isPositiveInteger(value.width)
         && isPositiveInteger(value.height)
         && isPositiveInteger(value.fps)
-        && value.codec === 'libvpx-vp9'
+        && value.codec === SCENE_VIDEO_CODEC
         && typeof value.createdAt === 'string'
         && !Number.isNaN(Date.parse(value.createdAt))
         && typeof value.outputFileName === 'string'
-        && /^[a-zA-Z0-9._-]+\.webm$/.test(value.outputFileName);
+        && /^[a-zA-Z0-9._-]+\.mp4$/.test(value.outputFileName);
 }
 
 export function parseSceneRecordingDuration(value: string): number | undefined {
@@ -236,7 +238,7 @@ export async function createSceneCacheTarget(
     }
     await fs.mkdir(cacheDir, { recursive: true });
     const safeOperationId = operationId.replace(/[^a-zA-Z0-9_-]/g, '-');
-    const outputFileName = `${cacheKey}-${safeOperationId}.webm`;
+    const outputFileName = `${cacheKey}-${safeOperationId}.mp4`;
     return {
         cacheDir,
         cacheKey,
@@ -244,7 +246,7 @@ export async function createSceneCacheTarget(
         temporaryVideoPath: path.join(cacheDir, `.${outputFileName}.recording`),
         finalVideoPath: path.join(cacheDir, outputFileName),
         manifest: {
-            version: 1,
+            version: SCENE_CACHE_VERSION,
             wallpaperId: source.wallpaperId,
             cacheKey,
             source: fingerprint,

@@ -67,7 +67,7 @@ export async function validateFfmpegExecutable(candidate: string): Promise<boole
         return devices.exitCode === 0
             && encoders.exitCode === 0
             && /\bgdigrab\b/i.test(deviceOutput)
-            && /\blibvpx-vp9\b/i.test(encoderOutput);
+            && /\blibx264\b/i.test(encoderOutput);
     } catch {
         return false;
     }

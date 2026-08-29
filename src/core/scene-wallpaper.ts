@@ -15,6 +15,7 @@ import {
     MAX_SCENE_RECORDING_SECONDS,
     MIN_SCENE_RECORDING_SECONDS,
     parseSceneRecordingDuration,
+    SCENE_VIDEO_CODEC,
     SceneRecordingProfile
 } from './scene-cache';
 import { createDirectPlaybackDescriptor, createScenePlaybackDescriptor } from './scene-preparation';
@@ -44,8 +45,8 @@ function sceneProgressMessage(state: SceneRecordingProgress, english: boolean): 
         case 'record':
             return `Recording ${state.elapsedSeconds ?? 0}/${state.totalSeconds ?? 0} seconds…`;
         case 'validate':
-            return state.message.includes('VP9')
-                ? 'Converting the Scene recording to VP9/WebM…'
+            return state.message.includes('H.264')
+                ? 'Converting the Scene recording to H.264/MP4…'
                 : 'Validating the Scene video cache…';
         case 'cleanup':
             return 'Cleaning up the Scene recording window and temporary files…';
@@ -108,7 +109,7 @@ export class SceneWallpaperService {
             width: 1920,
             height: 1080,
             fps: 30,
-            codec: 'libvpx-vp9'
+            codec: SCENE_VIDEO_CODEC
         };
         const cache = await this.record(item, source, profile, executables, config, operationId);
         return createScenePlaybackDescriptor(item, cache);
@@ -213,8 +214,8 @@ export class SceneWallpaperService {
         if (!ffmpegPath) {
             const action = await vscode.window.showErrorMessage(
                 this.isEnglishUi(config)
-                    ? 'A compatible FFmpeg with gdigrab and libvpx-vp9 was not detected.'
-                    : '未检测到同时支持 gdigrab 和 libvpx-vp9 的 FFmpeg。',
+                    ? 'A compatible FFmpeg with gdigrab and libx264 was not detected.'
+                    : '未检测到同时支持 gdigrab 和 libx264 的 FFmpeg。',
                 this.isEnglishUi(config) ? 'Select File' : '选择程序'
             );
             if (action) {

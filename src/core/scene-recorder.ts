@@ -83,14 +83,12 @@ export function buildFfmpegRecordingArgs(
         '-an',
         '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
         '-c:v', profile.codec,
-        '-deadline', 'realtime',
-        '-cpu-used', '6',
-        '-row-mt', '1',
-        '-tune-content', 'screen',
-        '-b:v', '0',
-        '-crf', '30',
+        '-preset', 'veryfast',
+        '-tune', 'animation',
+        '-crf', '23',
         '-pix_fmt', 'yuv420p',
-        '-f', 'webm',
+        '-movflags', '+faststart',
+        '-f', 'mp4',
         outputPath
     ];
 }
@@ -114,14 +112,12 @@ export function buildFfmpegTranscodeArgs(
         '-an',
         '-vf', filter,
         '-c:v', profile.codec,
-        '-deadline', 'good',
-        '-cpu-used', '4',
-        '-row-mt', '1',
-        '-tune-content', 'screen',
-        '-b:v', '0',
-        '-crf', '30',
+        '-preset', 'veryfast',
+        '-tune', 'animation',
+        '-crf', '23',
         '-pix_fmt', 'yuv420p',
-        '-f', 'webm',
+        '-movflags', '+faststart',
+        '-f', 'mp4',
         outputPath
     ];
 }
@@ -230,8 +226,8 @@ async function validateRecording(
         '-f', 'null', '-'
     ], { signal, timeoutMs: Math.max(15_000, expectedDurationSeconds * 2000) });
     const output = `${result.stdout}\n${result.stderr}`;
-    if (result.exitCode !== 0 || !/Video:\s*vp9\b/i.test(output)) {
-        throw new SceneRecordingError('capture', '录制结果不包含可用的 VP9 视频流');
+    if (result.exitCode !== 0 || !/Video:\s*h264\b/i.test(output)) {
+        throw new SceneRecordingError('capture', '录制结果不包含可用的 H.264 视频流');
     }
     const actualDuration = parseRecordedDuration(output);
     const minimumDuration = Math.max(0.5, expectedDurationSeconds - 2);
@@ -327,11 +323,11 @@ export async function recordSceneToCache(options: RecordSceneOptions): Promise<S
         }
 
         if (helperAvailable) {
-            // 录制完成后立即关闭渲染窗口，避免与 VP9 转码同时占用 GPU。
+            // 录制完成后立即关闭渲染窗口，避免与 H.264 转码同时占用 GPU。
             await closeWallpaperWindow(options.executables.wallpaperEnginePath, windowName).catch(error => {
                 options.logger.error('提前关闭 Scene 渲染窗口失败', error);
             });
-            report({ stage: 'validate', message: '正在将 Scene 录制转换为 VP9/WebM…' });
+            report({ stage: 'validate', message: '正在将 Scene 录制转换为 H.264/MP4…' });
             const transcodeResult = await runSceneProcess(
                 options.executables.ffmpegPath,
                 buildFfmpegTranscodeArgs(options.profile, intermediateCapturePath, target.temporaryVideoPath),

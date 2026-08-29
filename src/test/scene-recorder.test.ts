@@ -21,7 +21,7 @@ suite('Scene Recorder Test Suite', () => {
         width: 1920,
         height: 1080,
         fps: 30,
-        codec: 'libvpx-vp9'
+        codec: 'libx264'
     };
 
     test('builds a unique named Wallpaper Engine window command', () => {
@@ -39,24 +39,30 @@ suite('Scene Recorder Test Suite', () => {
         ]);
     });
 
-    test('builds gdigrab VP9 WebM recording arguments without a shell string', () => {
+    test('builds gdigrab H.264 MP4 recording arguments without a shell string', () => {
         const args = buildFfmpegRecordingArgs(profile, 'capture-window', 'cache.recording');
 
         assert.deepStrictEqual(args.slice(args.indexOf('-f'), args.indexOf('-f') + 2), ['-f', 'gdigrab']);
         assert.ok(args.includes('title=capture-window'));
-        assert.ok(args.includes('libvpx-vp9'));
-        assert.ok(args.includes('webm'));
+        assert.ok(args.includes('libx264'));
+        assert.ok(args.includes('mp4'));
+        assert.ok(args.includes('+faststart'));
+        assert.ok(!args.includes('libvpx-vp9'));
+        assert.ok(!args.includes('-row-mt'));
         assert.strictEqual(args.at(-1), 'cache.recording');
     });
 
-    test('builds a fixed-size 30 FPS VP9 transcode for WGC output', () => {
+    test('builds a fixed-size 30 FPS H.264 transcode for WGC output', () => {
         const args = buildFfmpegTranscodeArgs(profile, 'capture.mp4', 'cache.recording');
         const filter = args[args.indexOf('-vf') + 1];
 
         assert.match(filter, /crop=/);
         assert.match(filter, /scale=1920:1080/);
         assert.match(filter, /fps=30/);
-        assert.ok(args.includes('libvpx-vp9'));
+        assert.ok(args.includes('libx264'));
+        assert.ok(args.includes('mp4'));
+        assert.ok(args.includes('+faststart'));
+        assert.ok(!args.includes('-deadline'));
         assert.strictEqual(args.at(-1), 'cache.recording');
     });
 
