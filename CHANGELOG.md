@@ -6,6 +6,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-29
+
 ### Added
 
 - 原生 Scene 壁纸可通过 Wallpaper Engine 命名窗口自动录制为静音 H.264/MP4 缓存；录制时长默认 30 秒，可设置为 1–300 秒。
@@ -15,6 +17,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Fixed
 
+- 播放确认按待确认事务的创建时间过滤陈旧快照，避免复用旧 Extension Host 服务时读取上一次播放状态。
+- `play-rejected` 等旧版或瞬态错误不再立即终止确认；后续出现 `time-progress` 等 ready 状态即可正常完成设置。
+- 当前协议只将 `retry-exhausted`、`load-error` 和 `container-removed` 视为终态播放错误；确认超时时保留最后一次可恢复错误作为诊断。
 - Scene 播放状态持久化为实际缓存视频描述符，确保重载恢复、自动应用和设置回滚不会误用原始 Scene 资源。
 - 视频和 Scene 缓存改用受限的当前媒体 HTTP 入口，支持 `GET`、`HEAD`、单字节 Range、`206` 与 `416`，避免 `vscode-file` 在 Electron 媒体管线中的不稳定行为。
 - Workbench 注入新增有界媒体事件诊断、播放 Promise 错误、启动 watchdog 和真实时间轴推进确认；设置成功不再只依赖服务与入口存在。

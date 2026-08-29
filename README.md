@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/visual-studio-marketplace/v/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 
-将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.1.2`。
+将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.2.0`。
 
 本插件通过在 VS Code 核心文件中注入代码，实现了真正的动态背景支持，并提供了强大的 UI 透明化控制功能，让你在享受动态壁纸的同时，依然保持高效的编码体验。
 
@@ -148,10 +148,10 @@
 ### 设置完成但壁纸没有显示？
 
 1. 打开 `View: Toggle Output`，在下拉列表选择 `Wallpaper Engine`。
-2. 确认日志中的服务健康检查、入口检查、Workbench 注入和 `time-progress` 播放确认均成功。
+2. 确认日志中的服务健康检查、入口检查、Workbench 注入和 `time-progress` 播放确认均成功。`0.2.0` 起，确认只接受本次设置事务开始后的播放快照。
 3. 执行 `Developer: Reload Window`；VS Code 更新后可能覆盖注入，需要重新执行 `Set Wallpaper: 设置壁纸`。
 4. 检查 `vscode-wallpaper-engine.serverPort` 是否被其他进程占用。
-5. 若出现 `watchdog-timeout`、`play-rejected`、`media-error` 或播放确认超时，按日志中的具体阶段排查；失败的待确认记录会保留用于诊断，但不会循环重载窗口。
+5. `play-rejected` 等旧版或瞬态错误会继续等待后续 `ready`，不会立即误报失败；`retry-exhausted`、`load-error`、`container-removed` 才是当前协议的终态错误。若最终超时，日志会保留最后一次播放错误用于诊断。
 
 ### 设置面板语言没有更新？
 

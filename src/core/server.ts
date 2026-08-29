@@ -39,6 +39,7 @@ const PLAYBACK_READY_TIMEOUT_MS = 10000;
 const PLAYBACK_STATUS_POLL_INTERVAL_MS = 100;
 const PLAYBACK_STATUS_RESPONSE_LIMIT = 4 * 1024;
 const PLAYBACK_EVENT_BODY_LIMIT = 4 * 1024;
+// 只有当前注入协议明确停止自动恢复的事件才立即终止确认。
 const TERMINAL_PLAYBACK_ERROR_EVENTS = new Set([
     'retry-exhausted',
     'load-error',

@@ -24,7 +24,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 HTML 实际引用的 `electron-browser` 或 `electron-sandbox` `workbench.js`；旧布局才回退到 `workbench.desktop.main.js`。模块 URL 写入 `vscode-wallpaper` cache-bust 参数后请求窗口重载。
 7. 注入脚本创建 `#vscode-wallpaper-container`。壁纸层使用 `z-index: 0`，Workbench 根层使用独立的 `z-index: 1` stacking context；容器被后加载布局移除时只执行有界、幂等恢复。
 8. 视频、Scene 缓存和图片壁纸通过固定的 `/media/current` 加载；Video/Image 在 `/ping` 成功前不挂载媒体源，失败时最多进行三次有界启动尝试。Web 壁纸通过本地服务的 `/api/get-entry` 加载。
-9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频只有在 `playing` 后 `currentTime` 确实推进才进入 ready；重载后的 Extension Host 通过 `/playback-status` 确认后才报告成功。
+9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频只有在 `playing` 后 `currentTime` 确实推进才进入 ready；重载后的 Extension Host 通过 `/playback-status` 确认，并忽略早于本次待确认事务的陈旧快照后才报告成功。
 
 ## 3. 本地 HTTP 接口
 
@@ -38,7 +38,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 | `GET /api/get-entry` | 返回视频、图片或 Web 壁纸的可加载入口 HTML。 |
 | `GET/HEAD /media/current` | 只读取服务端当前播放条目；支持单 Range、`200/206/416`、正确 MIME 和长度，不接受路径参数。 |
 | `POST /playback-event` | 接收 Workbench 上报的有界媒体状态；请求体和诊断字段均有限制。 |
-| `GET /playback-status` | 返回最新播放快照或 `idle`，供重载后的 Extension Host 确认真实播放状态。 |
+| `GET /playback-status` | 返回最新播放快照或 `idle`，供重载后的 Extension Host 按事务时间确认真实播放状态。旧版或瞬态错误可被后续 ready 覆盖。 |
 | `GET /project.json` | 合并当前壁纸及依赖目录的项目属性，供壁纸属性面板使用。 |
 | `GET /proxy?url=...` | 为壁纸兼容层代理公开网络资源。只接受 `http`/`https`，拒绝私网或回环地址、DNS 解析到私网的目标和重定向；单请求超时 10 秒，响应上限 10 MiB。 |
 | `POST /shutdown` | 仅显式壁纸 handoff 使用；要求当前 owner lease，不提供 CORS，拒绝 `OPTIONS` 和过期租约。 |
@@ -88,7 +88,7 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 
 1. **服务未启动或端口冲突**：查看 `Wallpaper Engine` Output 中的 `/status` 和监听错误，修改 `serverPort` 后重新设置壁纸。
 2. **CSP 或注入标记缺失**：VS Code 更新后核心文件可能恢复原状，重新执行设置壁纸即可重新补丁。
-3. **启动瞬间可见、随后变黑**：先根据 `/playback-status` 区分“媒体未播放”和“媒体已播放但被遮挡”。前者查看 `media-error`、`play-rejected`、`watchdog-timeout`；后者检查 `surface.background`、容器层级和主题兼容状态。
+3. **启动瞬间可见、随后变黑**：先根据 `/playback-status` 区分“媒体未播放”和“媒体已播放但被遮挡”。`play-rejected` 等旧版或瞬态错误会继续等待；当前终态错误为 `retry-exhausted`、`load-error`、`container-removed`。媒体 ready 但仍不可见时，检查 `surface.background`、容器层级和主题兼容状态。
 4. **属性面板无内容**：确认当前壁纸包含可解析的 `project.json`，并检查本地服务是否能访问 `/project.json`。
 
 ## 8. 时序图
