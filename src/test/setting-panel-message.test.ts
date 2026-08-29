@@ -100,4 +100,18 @@ suite('Settings panel message protocol', () => {
         assert.match(webview, /#propsPanel \.control-item, #transparencyPanel \.control-item/);
         assert.match(webview, /dataset\.searchText/);
     });
+
+    test('publishes the modern UI surface rule for localized display and key search', () => {
+        const patcher = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'core', 'config-patcher.ts'), 'utf8');
+        const panel = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'panels', 'setting-panel.ts'), 'utf8');
+        const webview = fs.readFileSync(path.join(__dirname, '..', '..', 'media', 'settings.js'), 'utf8');
+
+        assert.match(patcher, /key: 'surface\.background'/);
+        assert.match(patcher, /labelZh: '现代界面基础表面背景'/);
+        assert.match(patcher, /labelEn: 'Modern UI surface background'/);
+        assert.match(panel, /TRANSPARENCY_COLOR_RULES\.map\(rule => \[rule\.key, \{ zhCN: rule\.labelZh, enUS: rule\.labelEn \}\]\)/);
+        assert.match(webview, /description\?\.zhCN/);
+        assert.match(webview, /description\?\.enUS/);
+        assert.match(webview, /description\?\.zhCN \|\| "",\s*description\?\.enUS \|\| "",\s*key,/);
+    });
 });

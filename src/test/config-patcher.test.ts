@@ -1,6 +1,20 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { normalizeTransparencyTargets, TRANSPARENT_COLOR_KEYS, TRANSPARENCY_COLOR_RULES } from '../core/config-patcher';
+
+interface ExtensionManifest {
+    contributes: {
+        configuration: {
+            properties: {
+                'vscode-wallpaper-engine.transparencyRules': {
+                    default: Record<string, number>;
+                };
+            };
+        };
+    };
+}
 
 suite('Transparency patch target helpers', () => {
     test('defaults to global, workspace, and workspace-folder scopes', () => {
@@ -49,6 +63,7 @@ suite('Transparency patch target helpers', () => {
         );
         assert.deepStrictEqual(TRANSPARENT_COLOR_KEYS.slice(0, 10), [
             'editor.background',
+            'surface.background',
             'editorGutter.background',
             'sideBar.background',
             'panel.background',
@@ -57,11 +72,27 @@ suite('Transparency patch target helpers', () => {
             'tab.activeBackground',
             'tab.inactiveBackground',
             'activityBar.background',
-            'statusBar.background',
         ]);
+        const surfaceRule = TRANSPARENCY_COLOR_RULES.find(rule => rule.key === 'surface.background');
+        assert.deepStrictEqual(surfaceRule, {
+            key: 'surface.background',
+            labelZh: '现代界面基础表面背景',
+            labelEn: 'Modern UI surface background',
+        });
         for (const rule of TRANSPARENCY_COLOR_RULES) {
             assert.ok(rule.labelZh.length > 0);
             assert.ok(rule.labelEn.length > 0);
         }
+    });
+
+    test('enables the modern UI surface in the default transparency rules', () => {
+        const manifestPath = path.join(__dirname, '..', '..', 'package.json');
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as ExtensionManifest;
+        const defaults = manifest.contributes.configuration.properties[
+            'vscode-wallpaper-engine.transparencyRules'
+        ].default;
+
+        assert.strictEqual(defaults['surface.background'], 0);
+        assert.ok(Object.hasOwn(defaults, 'editor.background'));
     });
 });

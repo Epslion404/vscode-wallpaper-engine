@@ -32,4 +32,19 @@ suite('Transparency State Test Suite', () => {
             'panel.background': '#ABCDEF'
         });
     });
+
+    test('backs up and restores the modern UI surface color', () => {
+        const applied = applyManagedColors(
+            { 'surface.background': '#202124' },
+            { 'surface.background': '#00000000' },
+            {},
+        );
+
+        assert.deepStrictEqual(applied.customizations, {
+            'surface.background': '#00000000',
+        });
+        assert.deepStrictEqual(restoreManagedColors(applied.customizations, applied.backups), {
+            'surface.background': '#202124',
+        });
+    });
 });

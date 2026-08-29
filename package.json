@@ -116,6 +116,7 @@
           "type": "object",
           "default": {
             "editor.background": 0,
+            "surface.background": 0,
             "editorGroup.emptyBackground": 0,
             "editorGroupHeader.tabsBackground": 0,
             "sideBar.background": 0,

@@ -50,6 +50,8 @@ export interface TransparencyColorRule {
 // 【透明化目标列表】覆盖 VS Code Theme Color Reference 中常见的可透明背景项。
 const TRANSPARENCY_COLOR_RULES_UNSORTED: readonly TransparencyColorRule[] = [
     { key: 'editor.background', labelZh: '编辑器背景', labelEn: 'Editor background' },
+    // VS Code 现代布局使用该通用表面包裹编辑器、侧边栏和面板；不透明主题值会整体遮住壁纸。
+    { key: 'surface.background', labelZh: '现代界面基础表面背景', labelEn: 'Modern UI surface background' },
     { key: 'editorGutter.background', labelZh: '编辑器行号与断点边栏背景', labelEn: 'Editor line number and glyph margin background' },
     { key: 'editorPane.background', labelZh: '居中编辑器两侧区域背景', labelEn: 'Editor pane background' },
     { key: 'editor.lineHighlightBackground', labelZh: '当前行高亮背景', labelEn: 'Current line highlight background' },
@@ -181,6 +183,7 @@ const TRANSPARENCY_COLOR_RULES_UNSORTED: readonly TransparencyColorRule[] = [
 
 const TRANSPARENCY_POPULARITY_ORDER = [
     'editor.background',
+    'surface.background',
     'editorGutter.background',
     'sideBar.background',
     'panel.background',
