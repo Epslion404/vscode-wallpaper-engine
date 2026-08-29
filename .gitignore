@@ -8,6 +8,7 @@ temp/
 .tmp-playback-e2e-*/
 .github/prompts/
 .planning/
+.nexus-map/
 
 # compiled vsix
 artifacts/
