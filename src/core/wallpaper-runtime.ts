@@ -18,6 +18,17 @@ export function needsWallpaperInjection(state: WallpaperRecoveryState): boolean 
         && !state.workbenchPatched;
 }
 
+/**
+ * 静默配置应用只能在播放类型不变时复用现有 Workbench 运行时。
+ * 首次应用或类型变化后，必须重载页面以执行刚写入的新注入脚本。
+ */
+export function needsAutomaticApplyReload(
+    previousType: PlayableWallpaperType | undefined,
+    nextType: PlayableWallpaperType
+): boolean {
+    return previousType === undefined || previousType !== nextType;
+}
+
 export interface UninstallSupersessionState {
     uninstallCreatedAt: number;
     setupCreatedAt: number;

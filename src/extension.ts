@@ -25,12 +25,17 @@ import {
 } from './core/wallpaper-setup';
 import { LifecycleState } from './core/lifecycle-state';
 import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
-import { evaluateUninstallSupersession, needsWallpaperInjection } from './core/wallpaper-runtime';
+import {
+    evaluateUninstallSupersession,
+    needsAutomaticApplyReload,
+    needsWallpaperInjection
+} from './core/wallpaper-runtime';
 import { extractThemeDescriptors, shouldApplyThemeCompatibility } from './core/theme-compatibility';
 import { WallpaperType } from './core/types';
 import { SceneRecordingError } from './core/scene-recorder';
 import {
     CURRENT_PLAYBACK_STATE_KEY,
+    isWallpaperPlaybackDescriptor,
     WallpaperPlaybackDescriptor
 } from './core/playback-state';
 import { SceneWallpaperService } from './core/scene-wallpaper';
@@ -359,6 +364,10 @@ export async function activate(context: vscode.ExtensionContext) {
             return; 
         }
 
+        const previousPlaybackCandidate: unknown = context.globalState.get(CURRENT_PLAYBACK_STATE_KEY);
+        const previousPlaybackType = isWallpaperPlaybackDescriptor(previousPlaybackCandidate)
+            ? previousPlaybackCandidate.playbackType
+            : undefined;
         const playback = await sceneWallpapers.resolveConfigured(config);
         if (playback) {
             
@@ -381,7 +390,16 @@ export async function activate(context: vscode.ExtensionContext) {
             // Apply transparency patch
             await applyTransparencyPatch();
             
-            if (silent) { return; }
+            if (silent) {
+                if (needsAutomaticApplyReload(previousPlaybackType, playback.playbackType)) {
+                    output.info(
+                        'automatic-apply',
+                        `播放类型从 ${previousPlaybackType ?? 'none'} 切换为 ${playback.playbackType}，请求窗口重载`
+                    );
+                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }
+                return;
+            }
 
             if (forceReload) {
                 await vscode.commands.executeCommand('workbench.action.reloadWindow');

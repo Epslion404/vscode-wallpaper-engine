@@ -1,5 +1,11 @@
 import * as assert from 'assert';
-import { evaluateUninstallSupersession, isPendingSetupState, needsWallpaperInjection } from '../core/wallpaper-runtime';
+import {
+    evaluateUninstallSupersession,
+    isPendingSetupState,
+    needsAutomaticApplyReload,
+    needsWallpaperInjection
+} from '../core/wallpaper-runtime';
+import { WallpaperType } from '../core/types';
 
 suite('Wallpaper Runtime Test Suite', () => {
     test('a newer matching setup supersedes the stale uninstall transaction', () => {
@@ -141,5 +147,18 @@ suite('Wallpaper Runtime Test Suite', () => {
             persistedEntry: 'index.html',
             workbenchPatched: false
         }), false);
+    });
+
+    test('reloads automatic apply when no previous runtime type exists or the media type changes', () => {
+        assert.strictEqual(needsAutomaticApplyReload(undefined, WallpaperType.Video), true);
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Video, WallpaperType.Image), true);
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Image, WallpaperType.Video), true);
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Web, WallpaperType.Video), true);
+    });
+
+    test('keeps same-type wallpaper changes on the lightweight media reload path', () => {
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Video, WallpaperType.Video), false);
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Image, WallpaperType.Image), false);
+        assert.strictEqual(needsAutomaticApplyReload(WallpaperType.Web, WallpaperType.Web), false);
     });
 });
