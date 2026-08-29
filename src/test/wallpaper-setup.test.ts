@@ -1,8 +1,12 @@
 import * as assert from 'assert';
 import { WallpaperType } from '../core/types';
 import {
+    isExpectedReloadCancellation,
+    isPendingSetupConfirmation,
     isPendingConfirmationFresh,
+    PendingSetupConfirmation,
     shouldConfirmPendingSetup,
+    confirmPendingSetupPlayback,
     WallpaperSetupError,
     WallpaperSetupInput,
     WallpaperSetupStage,
@@ -43,6 +47,7 @@ suite('Wallpaper Setup Test Suite', () => {
         });
 
         assert.strictEqual(result.operationId, 'operation-1');
+        assert.strictEqual(result.confirmation.playbackType, WallpaperType.Web);
         assert.deepStrictEqual(calls, [
             `stage:${WallpaperSetupStage.ValidateMedia}`,
             'validate',
@@ -212,6 +217,38 @@ suite('Wallpaper Setup Test Suite', () => {
         assert.deepStrictEqual(calls.slice(-2), [`stage:${WallpaperSetupStage.ReloadWorkbench}`, 'rollback']);
     });
 
+    test('treats expected Reload Window cancellation as handoff without rollback', async () => {
+        const calls: string[] = [];
+        let pending: PendingSetupConfirmation | undefined;
+        const cancellation = new Error('Canceled');
+        cancellation.name = 'CancellationError';
+
+        const result = await runWallpaperSetup(input, {
+            validateMedia: async () => undefined,
+            startServer: async () => undefined,
+            verifyHealth: async () => undefined,
+            verifyEntry: async () => undefined,
+            applyTransparency: async () => undefined,
+            inject: async () => undefined,
+            updateWallpaperId: async () => undefined,
+            savePendingConfirmation: async confirmation => {
+                pending = confirmation;
+                calls.push('pending-saved');
+            },
+            reloadWorkbench: async () => { throw cancellation; },
+            rollback: async () => { calls.push('rollback'); },
+            report: stage => { calls.push(`stage:${stage}`); },
+            createOperationId: () => 'operation-reload-cancelled',
+            now: () => 5500
+        });
+
+        assert.strictEqual(result.operationId, 'operation-reload-cancelled');
+        assert.strictEqual(result.confirmation, pending);
+        assert.strictEqual(result.confirmation.playbackType, WallpaperType.Web);
+        assert.ok(calls.includes('pending-saved'));
+        assert.ok(!calls.includes('rollback'));
+    });
+
     test('keeps configuration commit failure when restoring the old state also fails', async () => {
         await assert.rejects(
             runWallpaperSetup(input, {
@@ -242,12 +279,13 @@ suite('Wallpaper Setup Test Suite', () => {
     });
 
     test('accepts only recent pending confirmations', () => {
-        const confirmation = {
+        const confirmation: PendingSetupConfirmation = {
             operationId: 'operation-4',
             wallpaperId: '123',
             wallpaperTitle: '测试壁纸',
             dirPath: 'D:/wallpapers/123',
             fileName: 'index.html',
+            playbackType: WallpaperType.Web,
             createdAt: 1000
         };
 
@@ -258,12 +296,13 @@ suite('Wallpaper Setup Test Suite', () => {
     });
 
     test('confirms pending setup only when wallpaper is unchanged and confirmation is fresh', () => {
-        const confirmation = {
+        const confirmation: PendingSetupConfirmation = {
             operationId: 'operation-5',
             wallpaperId: '123',
             wallpaperTitle: '测试壁纸',
             dirPath: 'D:/wallpapers/123',
             fileName: 'index.html',
+            playbackType: WallpaperType.Web,
             createdAt: 1000
         };
 
@@ -272,5 +311,173 @@ suite('Wallpaper Setup Test Suite', () => {
         assert.strictEqual(shouldConfirmPendingSetup(confirmation, '123', 1000 + 5 * 60 * 1000 + 1), false);
         assert.strictEqual(shouldConfirmPendingSetup({ ...confirmation, dirPath: '' }, '123', 1000), false);
         assert.strictEqual(shouldConfirmPendingSetup({ ...confirmation, fileName: '' }, '123', 1000), false);
+    });
+
+    test('strictly rejects old or malformed pending setup records', () => {
+        const valid = {
+            operationId: 'operation-6',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'index.html',
+            playbackType: WallpaperType.Web,
+            createdAt: 1000
+        };
+
+        assert.strictEqual(isPendingSetupConfirmation(valid), true);
+        const { playbackType: _removed, ...oldStructure } = valid;
+        assert.strictEqual(isPendingSetupConfirmation(oldStructure), false);
+        assert.strictEqual(isPendingSetupConfirmation({ ...valid, playbackType: 'scene' }), false);
+        assert.strictEqual(isPendingSetupConfirmation({ ...valid, createdAt: Number.NaN }), false);
+        assert.strictEqual(isPendingSetupConfirmation({ ...valid, wallpaperTitle: '' }), false);
+    });
+
+    test('recognizes only exact expected reload cancellation markers', () => {
+        const cancellationError = new Error('Canceled');
+        cancellationError.name = 'CancellationError';
+
+        assert.strictEqual(isExpectedReloadCancellation(cancellationError), true);
+        assert.strictEqual(isExpectedReloadCancellation({ name: 'Canceled', message: '' }), true);
+        assert.strictEqual(isExpectedReloadCancellation({ code: 'Canceled' }), true);
+        assert.strictEqual(isExpectedReloadCancellation(new Error('Canceled while saving configuration')), false);
+        assert.strictEqual(isExpectedReloadCancellation(new Error('窗口重载失败')), false);
+    });
+
+    test('verifies service, media entry and actual playback before success', async () => {
+        const confirmation: PendingSetupConfirmation = {
+            operationId: 'operation-ready',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'wallpaper.webm',
+            playbackType: WallpaperType.Video,
+            createdAt: 1000
+        };
+        const calls: string[] = [];
+
+        await confirmPendingSetupPlayback(confirmation, {
+            verifyHealth: async value => { calls.push(`health:${value.fileName}`); },
+            verifyEntry: async () => { calls.push('entry'); },
+            verifyPlaybackReady: async type => { calls.push(`ready:${type}`); },
+            clearPendingConfirmation: async () => { calls.push('pending-cleared'); },
+            report: stage => { calls.push(`stage:${stage}`); }
+        });
+
+        assert.deepStrictEqual(calls, [
+            `stage:${WallpaperSetupStage.VerifyHealth}`,
+            'health:wallpaper.webm',
+            `stage:${WallpaperSetupStage.VerifyEntry}`,
+            'entry',
+            `stage:${WallpaperSetupStage.VerifyPlayback}`,
+            'ready:video',
+            `stage:${WallpaperSetupStage.FinalizePlayback}`,
+            'pending-cleared'
+        ]);
+    });
+
+    test('classifies playback timeout at the playback-ready stage', async () => {
+        const confirmation: PendingSetupConfirmation = {
+            operationId: 'operation-timeout',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'wallpaper.webm',
+            playbackType: WallpaperType.Video,
+            createdAt: 1000
+        };
+
+        let pendingCleared = false;
+        await assert.rejects(confirmPendingSetupPlayback(confirmation, {
+            verifyHealth: async () => undefined,
+            verifyEntry: async () => undefined,
+            verifyPlaybackReady: async () => { throw new Error('播放就绪等待超时'); },
+            clearPendingConfirmation: async () => { pendingCleared = true; },
+            report: () => undefined
+        }), error => {
+            assert.ok(error instanceof WallpaperSetupError);
+            assert.strictEqual(error.stage, WallpaperSetupStage.VerifyPlayback);
+            assert.match(error.message, /超时/);
+            return true;
+        });
+        assert.strictEqual(pendingCleared, false);
+    });
+
+    test('classifies a media loading error without attempting playback verification', async () => {
+        const confirmation: PendingSetupConfirmation = {
+            operationId: 'operation-media-error',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'wallpaper.webm',
+            playbackType: WallpaperType.Video,
+            createdAt: 1000
+        };
+        let playbackChecked = false;
+
+        await assert.rejects(confirmPendingSetupPlayback(confirmation, {
+            verifyHealth: async () => undefined,
+            verifyEntry: async () => { throw new Error('媒体入口加载失败'); },
+            verifyPlaybackReady: async () => { playbackChecked = true; },
+            clearPendingConfirmation: async () => undefined,
+            report: () => undefined
+        }), error => {
+            assert.ok(error instanceof WallpaperSetupError);
+            assert.strictEqual(error.stage, WallpaperSetupStage.VerifyEntry);
+            assert.match(error.message, /媒体入口加载失败/);
+            return true;
+        });
+        assert.strictEqual(playbackChecked, false);
+    });
+
+    test('classifies a media element error reported by playback readiness', async () => {
+        const confirmation: PendingSetupConfirmation = {
+            operationId: 'operation-media-element-error',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'wallpaper.webm',
+            playbackType: WallpaperType.Video,
+            createdAt: 1000
+        };
+
+        let pendingCleared = false;
+        await assert.rejects(confirmPendingSetupPlayback(confirmation, {
+            verifyHealth: async () => undefined,
+            verifyEntry: async () => undefined,
+            verifyPlaybackReady: async () => { throw new Error('媒体播放失败：decode-error，code=3'); },
+            clearPendingConfirmation: async () => { pendingCleared = true; },
+            report: () => undefined
+        }), error => {
+            assert.ok(error instanceof WallpaperSetupError);
+            assert.strictEqual(error.stage, WallpaperSetupStage.VerifyPlayback);
+            assert.match(error.message, /decode-error/);
+            return true;
+        });
+        assert.strictEqual(pendingCleared, false);
+    });
+
+    test('distinguishes confirmation persistence failure from media playback failure', async () => {
+        const confirmation: PendingSetupConfirmation = {
+            operationId: 'operation-finalize-error',
+            wallpaperId: '123',
+            wallpaperTitle: '测试壁纸',
+            dirPath: 'D:/wallpapers/123',
+            fileName: 'wallpaper.webm',
+            playbackType: WallpaperType.Video,
+            createdAt: 1000
+        };
+
+        await assert.rejects(confirmPendingSetupPlayback(confirmation, {
+            verifyHealth: async () => undefined,
+            verifyEntry: async () => undefined,
+            verifyPlaybackReady: async () => undefined,
+            clearPendingConfirmation: async () => { throw new Error('无法保存确认状态'); },
+            report: () => undefined
+        }), error => {
+            assert.ok(error instanceof WallpaperSetupError);
+            assert.strictEqual(error.stage, WallpaperSetupStage.FinalizePlayback);
+            assert.match(error.message, /无法保存确认状态/);
+            return true;
+        });
     });
 });

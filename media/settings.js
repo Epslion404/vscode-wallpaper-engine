@@ -51,18 +51,21 @@ function localizeStatusMessage(message) {
   const exact = {
     "等待操作": "Waiting for operation", "未找到可用壁纸": "No usable wallpapers found", "已取消设置壁纸": "Wallpaper setup cancelled",
     "正在检查扩展配置…": "Checking extension configuration…", "正在扫描壁纸库…": "Scanning wallpaper library…", "正在等待选择壁纸…": "Waiting for wallpaper selection…",
-    "正在校验壁纸媒体…": "Validating wallpaper media…", "正在启动本地服务…": "Starting local server…", "正在检查服务状态…": "Checking server status…",
-    "正在验证壁纸入口…": "Verifying wallpaper entry…", "正在应用界面透明化…": "Applying UI transparency…", "正在写入 Workbench…": "Writing Workbench patch…",
+    "正在校验壁纸媒体…": "Validating wallpaper media…", "正在启动本地服务…": "Starting local server…", "正在等待壁纸服务就绪…": "Waiting for the wallpaper service…",
+    "壁纸服务已就绪，正在加载壁纸媒体…": "Wallpaper service is ready; loading media…", "壁纸媒体已加载，正在确认播放…": "Wallpaper media is loaded; confirming playback…",
+    "壁纸正在播放，正在完成状态确认…": "Wallpaper is playing; finalizing confirmation…",
+    "正在应用界面透明化…": "Applying UI transparency…", "正在写入 Workbench…": "Writing Workbench patch…",
     "正在保存壁纸配置…": "Saving wallpaper configuration…", "正在重新加载窗口…": "Reloading window…",
-    "窗口重载后的生效验证失败": "Post-reload wallpaper verification failed",
     "无法清除旧还原事务，未启动壁纸设置": "Could not clear the previous restore transaction; wallpaper setup did not start",
     "请先配置正确的 Wallpaper Engine 创意工坊目录。": "Configure a valid Wallpaper Engine workshop directory first."
   };
   if (exact[message]) return exact[message];
-  const active = message.match(/^壁纸「(.+)」已生效$/);
-  if (active) return `Wallpaper "${active[1]}" is active`;
-  const reloadFailure = message.match(/^窗口重载后未确认壁纸生效（(.+)），请查看日志并重试$/);
-  if (reloadFailure) return `Wallpaper was not confirmed after reload (${reloadFailure[1]}). Check the log and retry.`;
+  const active = message.match(/^壁纸「(.+)」正在播放$/);
+  if (active) return `Wallpaper "${active[1]}" is playing`;
+  const playbackFailure = message.match(/^壁纸播放失败：(.+)$/);
+  if (playbackFailure) return `Wallpaper playback failed: ${playbackFailure[1]}`;
+  const confirmationFailure = message.match(/^壁纸已开始播放，但状态确认失败：(.+)$/);
+  if (confirmationFailure) return `Wallpaper is playing, but confirmation could not be saved: ${confirmationFailure[1]}`;
   const setupFailure = message.match(/^设置壁纸失败（(.+)）：(.+)$/);
   if (setupFailure) return `Wallpaper setup failed at ${setupFailure[1]}: ${setupFailure[2]}`;
   return message;

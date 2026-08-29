@@ -17,11 +17,22 @@ import {
 } from './server-preflight';
 import { PENDING_SETUP_CONFIRMATION_KEY } from './wallpaper-setup';
 import { CURRENT_PLAYBACK_STATE_KEY } from './playback-state';
+import {
+    parsePlaybackReport,
+    parsePlaybackStatus,
+    PlaybackMediaType,
+    PlaybackMonitor
+} from './playback-monitor';
+import { serveCurrentMedia } from './server-media';
 
 export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupTimeoutError } from './server-preflight';
 
 const SERVER_STARTUP_TIMEOUT_MS = 5000;
 const SERVER_PREFLIGHT_TIMEOUT_MS = 3000;
+const PLAYBACK_READY_TIMEOUT_MS = 10000;
+const PLAYBACK_STATUS_POLL_INTERVAL_MS = 100;
+const PLAYBACK_STATUS_RESPONSE_LIMIT = 4 * 1024;
+const PLAYBACK_EVENT_BODY_LIMIT = 4 * 1024;
 
 const PERSISTED_WALLPAPER_STATE_KEYS = [
     'currentWallpaperPath',
@@ -44,6 +55,29 @@ type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
 type ProjectProperties = Record<string, JsonObject>;
+
+type BoundedBodyResult = { kind: 'ok'; body: string } | { kind: 'too-large' };
+
+async function readBoundedBody(request: http.IncomingMessage, maxBytes: number): Promise<BoundedBodyResult> {
+    const declaredLength = Number(request.headers['content-length'] ?? 0);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        request.resume();
+        return { kind: 'too-large' };
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of request) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        total += buffer.byteLength;
+        if (total > maxBytes) {
+            request.resume();
+            return { kind: 'too-large' };
+        }
+        chunks.push(buffer);
+    }
+    return { kind: 'ok', body: Buffer.concat(chunks).toString('utf-8') };
+}
 
 function isJsonValue(value: unknown): value is JsonValue {
     if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -108,6 +142,9 @@ export class WallpaperServer {
     private readonly SHUTDOWN_DELAY = 2 * 60 * 1000; // 2 minutes
     private entryFile: string | null = null;
     private currentLocation: string | undefined;
+    private readonly playbackMonitor = new PlaybackMonitor();
+    private lastPlaybackLogAt = 0;
+    private readonly loggedPlaybackTerminalStates = new Set<'ready' | 'error'>();
 
     private cssConfig = {
         customCss: '',
@@ -230,6 +267,10 @@ export class WallpaperServer {
     }
 
     public async start(rootPath: string, port: number, entryFile?: string, location?: string, silent = false): Promise<void> {
+        // 每次启动或热切换都必须丢弃旧页面的播放结论。
+        this.playbackMonitor.reset();
+        this.lastPlaybackLogAt = 0;
+        this.loggedPlaybackTerminalStates.clear();
         console.log(`[server launch] start called. root: ${rootPath}, port: ${port}, entry: ${entryFile}, loc: ${location}`);
         vscode.window.setStatusBarMessage(`Preparing Wallpaper Server...`, 5000);
         
@@ -312,7 +353,12 @@ export class WallpaperServer {
 
         console.log(`[server launch] Creating HTTP server...`);
         this.server = http.createServer((req, res) => {
-            console.log(`[server launch] Request received: ${req.method} ${req.url}`);
+            const isHighFrequencyEndpoint = req.url?.startsWith('/media/current')
+                || req.url?.startsWith('/playback-event')
+                || req.url?.startsWith('/playback-status');
+            if (!isHighFrequencyEndpoint) {
+                console.log(`[server launch] Request received: ${req.method} ${req.url}`);
+            }
             this.resetShutdownTimer(); // Reset timer on every request
 
             const safeRoot = path.normalize(this.currentRoot);
@@ -326,14 +372,58 @@ export class WallpaperServer {
                 return;
             }
             
-            console.log(`[Server] Request: ${req.method} ${req.url} -> ${reqUrl}`);
+            if (!isHighFrequencyEndpoint) {
+                console.log(`[Server] Request: ${req.method} ${req.url} -> ${reqUrl}`);
+            }
 
             if (req.method === 'OPTIONS') {
                 res.setHeader('Access-Control-Allow-Origin', '*');
-                res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+                const allowedMethods = reqUrl === '/media/current'
+                    ? 'GET, HEAD, OPTIONS'
+                    : reqUrl === '/playback-event'
+                        ? 'POST, OPTIONS'
+                        : reqUrl === '/playback-status'
+                            ? 'GET, OPTIONS'
+                            : 'GET, POST, OPTIONS';
+                res.setHeader('Access-Control-Allow-Methods', allowedMethods);
                 res.setHeader('Access-Control-Allow-Headers', '*');
                 res.statusCode = 204;
                 res.end();
+                return;
+            }
+
+            if (reqUrl === '/media/current') {
+                void serveCurrentMedia(req, res, {
+                    rootPath: this.currentRoot,
+                    location: this.currentLocation,
+                    entryFile: this.entryFile
+                }).catch(error => {
+                    const name = error instanceof Error ? error.name : 'UnknownError';
+                    console.error(`[Media] 当前媒体请求处理失败：${name}`);
+                    if (!res.headersSent) {
+                        res.statusCode = 500;
+                        res.end('Media request failed');
+                    } else {
+                        res.destroy(error instanceof Error ? error : undefined);
+                    }
+                });
+                return;
+            }
+
+            if (reqUrl === '/playback-event') {
+                void this.handlePlaybackEvent(req, res).catch(error => {
+                    const name = error instanceof Error ? error.name : 'UnknownError';
+                    console.error(`[Playback] 播放事件处理失败：${name}`);
+                    if (!res.headersSent) {
+                        res.statusCode = 500;
+                        res.end('Playback event failed');
+                    }
+                });
+                return;
+            }
+
+            if (reqUrl === '/playback-status') {
+                this.handlePlaybackStatus(req, res);
                 return;
             }
 
@@ -986,6 +1076,139 @@ ${baseTag}
             throw new WallpaperPreflightError('entry', `壁纸入口内容类型无效: ${response.contentType || '缺失'}`);
         }
         console.log(`[Server Preflight] Entry check passed on port ${this.PORT}`);
+    }
+
+    /** 等待 Workbench 回报真实播放就绪，而不是只确认媒体文件存在。 */
+    public async verifyPlaybackReady(
+        expectedMediaType: PlaybackMediaType,
+        timeoutMs = PLAYBACK_READY_TIMEOUT_MS
+    ): Promise<void> {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            throw new Error('播放就绪超时时间必须大于 0');
+        }
+        const deadline = Date.now() + timeoutMs;
+        let lastRequestError: Error | undefined;
+
+        while (Date.now() < deadline) {
+            const remaining = Math.max(deadline - Date.now(), 1);
+            try {
+                const response = await requestLocalEndpoint(
+                    this.PORT,
+                    '/playback-status',
+                    Math.min(remaining, 1000)
+                );
+                if (response.statusCode !== 200) {
+                    throw new Error(`播放状态端点返回 HTTP ${response.statusCode}`);
+                }
+                if (!response.contentType.toLowerCase().startsWith('application/json')) {
+                    throw new Error('播放状态端点内容类型无效');
+                }
+                if (Buffer.byteLength(response.body) > PLAYBACK_STATUS_RESPONSE_LIMIT) {
+                    throw new Error('播放状态响应过大');
+                }
+
+                let parsed: unknown;
+                try {
+                    parsed = JSON.parse(response.body);
+                } catch {
+                    throw new Error('播放状态响应不是有效 JSON');
+                }
+                const status = parsePlaybackStatus(parsed);
+                if (!status) {
+                    throw new Error('播放状态响应字段无效');
+                }
+                lastRequestError = undefined;
+                if (status.state !== 'idle' && status.mediaType === expectedMediaType) {
+                    if (status.state === 'ready') {
+                        console.log(`[Playback] ${expectedMediaType} 已确认播放就绪`);
+                        return;
+                    }
+                    if (status.state === 'error') {
+                        throw new Error(
+                            `媒体播放失败（${status.event}${status.errorCode === undefined ? '' : `，错误码 ${status.errorCode}`}）`
+                        );
+                    }
+                }
+            } catch (error) {
+                const normalized = error instanceof Error ? error : new Error(String(error));
+                if (normalized.message.startsWith('媒体播放失败')) {
+                    throw normalized;
+                }
+                lastRequestError = normalized;
+            }
+
+            const delay = Math.min(PLAYBACK_STATUS_POLL_INTERVAL_MS, Math.max(deadline - Date.now(), 0));
+            if (delay > 0) {
+                await new Promise<void>(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        const suffix = lastRequestError ? `；最后错误：${lastRequestError.message}` : '';
+        throw new Error(`等待 ${expectedMediaType} 播放就绪超时（${timeoutMs} 毫秒）${suffix}`);
+    }
+
+    private async handlePlaybackEvent(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+        if (request.method !== 'POST') {
+            response.statusCode = 405;
+            response.setHeader('Allow', 'POST');
+            response.end('Method Not Allowed');
+            return;
+        }
+
+        const body = await readBoundedBody(request, PLAYBACK_EVENT_BODY_LIMIT);
+        if (body.kind === 'too-large') {
+            response.statusCode = 413;
+            response.end('Playback event too large');
+            return;
+        }
+
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(body.body);
+        } catch {
+            response.statusCode = 400;
+            response.end('Invalid playback event');
+            return;
+        }
+        const report = parsePlaybackReport(parsed);
+        if (!report) {
+            response.statusCode = 400;
+            response.end('Invalid playback event');
+            return;
+        }
+
+        const snapshot = this.playbackMonitor.update(report);
+        const now = Date.now();
+        const terminalState = snapshot.state === 'ready' || snapshot.state === 'error'
+            ? snapshot.state
+            : undefined;
+        const shouldLogTerminal = terminalState !== undefined
+            && !this.loggedPlaybackTerminalStates.has(terminalState);
+        if (shouldLogTerminal || terminalState === undefined && now - this.lastPlaybackLogAt >= 1000) {
+            this.lastPlaybackLogAt = now;
+            if (terminalState !== undefined) {
+                this.loggedPlaybackTerminalStates.add(terminalState);
+            }
+            console.log(
+                `[Playback] state=${snapshot.state} media=${snapshot.mediaType} event=${snapshot.event}`
+                + `${snapshot.errorCode === undefined ? '' : ` errorCode=${snapshot.errorCode}`}`
+            );
+        }
+        response.statusCode = 204;
+        response.end();
+    }
+
+    private handlePlaybackStatus(request: http.IncomingMessage, response: http.ServerResponse): void {
+        if (request.method !== 'GET') {
+            response.statusCode = 405;
+            response.setHeader('Allow', 'GET');
+            response.end('Method Not Allowed');
+            return;
+        }
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
+        response.setHeader('X-Content-Type-Options', 'nosniff');
+        response.end(JSON.stringify(this.playbackMonitor.current() ?? { state: 'idle' }));
     }
 
     private updateSearchPaths(rootPath: string, location?: string) {

@@ -12,6 +12,8 @@ export enum WallpaperSetupStage {
     StartServer = 'startServer',
     VerifyHealth = 'verifyHealth',
     VerifyEntry = 'verifyEntry',
+    VerifyPlayback = 'verifyPlayback',
+    FinalizePlayback = 'finalizePlayback',
     ApplyTransparency = 'applyTransparency',
     InjectWorkbench = 'injectWorkbench',
     SaveConfiguration = 'saveConfiguration',
@@ -40,6 +42,7 @@ export interface PendingSetupConfirmation {
     wallpaperTitle: string;
     dirPath: string;
     fileName: string;
+    playbackType: PlayableWallpaperType;
     createdAt: number;
 }
 
@@ -70,6 +73,14 @@ export interface WallpaperSetupDependencies {
     now(): number;
 }
 
+export interface PendingSetupVerificationDependencies {
+    verifyHealth(confirmation: PendingSetupConfirmation): PromiseLike<void>;
+    verifyEntry(): PromiseLike<void>;
+    verifyPlaybackReady(playbackType: PlayableWallpaperType): PromiseLike<void>;
+    clearPendingConfirmation(): PromiseLike<void>;
+    report(stage: WallpaperSetupStage): void;
+}
+
 export class WallpaperSetupError extends Error {
     public rollbackMessage?: string;
 
@@ -94,15 +105,90 @@ function asSetupError(stage: WallpaperSetupStage, error: unknown): WallpaperSetu
     return new WallpaperSetupError(stage, errorMessage(error), { cause: error });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPlayableWallpaperType(value: unknown): value is PlayableWallpaperType {
+    return value === 'video' || value === 'image' || value === 'web';
+}
+
+/**
+ * VS Code 在执行 Reload Window 时会主动终止旧 Extension Host，并可能以取消错误结束命令 Promise。
+ * 这里只接受 VS Code 已知的精确取消标记，避免把真实的重载失败误判为成功。
+ */
+export function isExpectedReloadCancellation(error: unknown): boolean {
+    if (!isRecord(error) && !(error instanceof Error)) {
+        return false;
+    }
+    const candidate = error as { name?: unknown; message?: unknown; code?: unknown };
+    const name = typeof candidate.name === 'string' ? candidate.name : '';
+    const message = typeof candidate.message === 'string' ? candidate.message : '';
+    const code = typeof candidate.code === 'string' ? candidate.code : '';
+    return name === 'CancellationError'
+        || name === 'Canceled'
+        || message === 'Canceled'
+        || code === 'Canceled';
+}
+
+/** 持久化状态属于外部输入，旧结构或未知播放类型必须拒绝。 */
+export function isPendingSetupConfirmation(value: unknown): value is PendingSetupConfirmation {
+    if (!isRecord(value)) {
+        return false;
+    }
+    return typeof value.operationId === 'string'
+        && value.operationId.length > 0
+        && typeof value.wallpaperId === 'string'
+        && value.wallpaperId.length > 0
+        && typeof value.wallpaperTitle === 'string'
+        && value.wallpaperTitle.length > 0
+        && typeof value.dirPath === 'string'
+        && value.dirPath.length > 0
+        && typeof value.fileName === 'string'
+        && value.fileName.length > 0
+        && isPlayableWallpaperType(value.playbackType)
+        && typeof value.createdAt === 'number'
+        && Number.isFinite(value.createdAt);
+}
+
+/** 新窗口按服务、入口、实际播放顺序确认，错误保留准确阶段。 */
+export async function confirmPendingSetupPlayback(
+    confirmation: PendingSetupConfirmation,
+    dependencies: PendingSetupVerificationDependencies
+): Promise<void> {
+    let stage = WallpaperSetupStage.VerifyHealth;
+    const runStage = async (nextStage: WallpaperSetupStage, action: () => PromiseLike<void>) => {
+        stage = nextStage;
+        dependencies.report(stage);
+        await action();
+    };
+    try {
+        await runStage(WallpaperSetupStage.VerifyHealth, () => dependencies.verifyHealth(confirmation));
+        await runStage(WallpaperSetupStage.VerifyEntry, () => dependencies.verifyEntry());
+        await runStage(
+            WallpaperSetupStage.VerifyPlayback,
+            () => dependencies.verifyPlaybackReady(confirmation.playbackType)
+        );
+        // pending 是跨 Extension Host 的事务凭据，只能在真实播放确认成功后清除。
+        await runStage(
+            WallpaperSetupStage.FinalizePlayback,
+            () => dependencies.clearPendingConfirmation()
+        );
+    } catch (error) {
+        throw asSetupError(stage, error);
+    }
+}
+
 export async function runWallpaperSetup(
     input: WallpaperSetupInput,
     dependencies: WallpaperSetupDependencies
 ): Promise<WallpaperSetupResult> {
-    let stage = WallpaperSetupStage.ValidateMedia;
+    const state: { stage: WallpaperSetupStage } = { stage: WallpaperSetupStage.ValidateMedia };
     const operationId = dependencies.createOperationId();
+    let confirmation: PendingSetupConfirmation | undefined;
     const runStage = async (nextStage: WallpaperSetupStage, action: () => PromiseLike<void>) => {
-        stage = nextStage;
-        dependencies.report(stage, input);
+        state.stage = nextStage;
+        dependencies.report(state.stage, input);
         await action();
     };
 
@@ -115,19 +201,25 @@ export async function runWallpaperSetup(
         await runStage(WallpaperSetupStage.InjectWorkbench, () => dependencies.inject(input));
         await runStage(WallpaperSetupStage.SaveConfiguration, () => dependencies.updateWallpaperId(input.wallpaperId));
 
-        const confirmation: PendingSetupConfirmation = {
+        confirmation = {
             operationId,
             wallpaperId: input.wallpaperId,
             wallpaperTitle: input.wallpaperTitle,
             dirPath: input.dirPath,
             fileName: input.fileName,
+            playbackType: input.type,
             createdAt: dependencies.now()
         };
         await dependencies.savePendingConfirmation(confirmation);
         await runStage(WallpaperSetupStage.ReloadWorkbench, () => dependencies.reloadWorkbench());
         return { operationId, confirmation };
     } catch (error) {
-        const setupError = asSetupError(stage, error);
+        if (state.stage === WallpaperSetupStage.ReloadWorkbench
+            && confirmation
+            && isExpectedReloadCancellation(error)) {
+            return { operationId, confirmation };
+        }
+        const setupError = asSetupError(state.stage, error);
         try {
             await dependencies.rollback();
         } catch (rollbackError) {
@@ -146,17 +238,12 @@ export function isPendingConfirmationFresh(
 }
 
 export function shouldConfirmPendingSetup(
-    confirmation: PendingSetupConfirmation,
+    confirmation: unknown,
     currentWallpaperId: string,
     now: number,
     maxAgeMs = 5 * 60 * 1000
 ): boolean {
-    return typeof confirmation === 'object'
-        && confirmation !== null
-        && typeof confirmation.dirPath === 'string'
-        && confirmation.dirPath.length > 0
-        && typeof confirmation.fileName === 'string'
-        && confirmation.fileName.length > 0
+    return isPendingSetupConfirmation(confirmation)
         && confirmation.wallpaperId === currentWallpaperId
         && isPendingConfirmationFresh(confirmation, now, maxAgeMs);
 }

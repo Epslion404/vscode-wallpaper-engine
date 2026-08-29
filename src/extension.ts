@@ -14,15 +14,18 @@ import { WallpaperOutput } from './core/output';
 import { toUserErrorReason } from './core/user-message';
 import {
     PENDING_SETUP_CONFIRMATION_KEY,
+    isExpectedReloadCancellation,
+    isPendingSetupConfirmation,
     runWallpaperSetup,
     shouldConfirmPendingSetup,
+    confirmPendingSetupPlayback,
     WallpaperSetupError,
     WallpaperSetupInput,
     WallpaperSetupStage
 } from './core/wallpaper-setup';
 import { LifecycleState } from './core/lifecycle-state';
 import { isPendingUninstall, PendingUninstall, runUninstall, UninstallStage, verifyUninstallState } from './core/uninstall';
-import { evaluateUninstallSupersession, isPendingSetupState, needsWallpaperInjection } from './core/wallpaper-runtime';
+import { evaluateUninstallSupersession, needsWallpaperInjection } from './core/wallpaper-runtime';
 import { extractThemeDescriptors, shouldApplyThemeCompatibility } from './core/theme-compatibility';
 import { WallpaperType } from './core/types';
 import { SceneRecordingError } from './core/scene-recorder';
@@ -65,8 +68,10 @@ const STAGE_MESSAGES: Record<WallpaperSetupStage, string> = {
     [WallpaperSetupStage.ValidateSceneCache]: '正在验证 Scene 视频缓存…',
     [WallpaperSetupStage.ValidateMedia]: '正在校验壁纸媒体…',
     [WallpaperSetupStage.StartServer]: '正在启动本地服务…',
-    [WallpaperSetupStage.VerifyHealth]: '正在检查服务状态…',
-    [WallpaperSetupStage.VerifyEntry]: '正在验证壁纸入口…',
+    [WallpaperSetupStage.VerifyHealth]: '正在等待壁纸服务就绪…',
+    [WallpaperSetupStage.VerifyEntry]: '壁纸服务已就绪，正在加载壁纸媒体…',
+    [WallpaperSetupStage.VerifyPlayback]: '壁纸媒体已加载，正在确认播放…',
+    [WallpaperSetupStage.FinalizePlayback]: '壁纸正在播放，正在完成状态确认…',
     [WallpaperSetupStage.ApplyTransparency]: '正在应用界面透明化…',
     [WallpaperSetupStage.InjectWorkbench]: '正在写入 Workbench…',
     [WallpaperSetupStage.SaveConfiguration]: '正在保存壁纸配置…',
@@ -137,7 +142,7 @@ export async function activate(context: vscode.ExtensionContext) {
         console.warn('[Wallpaper] 丢弃格式无效的 pending uninstall 记录');
     }
     const pendingSetupCandidate: unknown = context.globalState.get(PENDING_SETUP_CONFIRMATION_KEY);
-    const pendingSetup = isPendingSetupState(pendingSetupCandidate)
+    const pendingSetup = isPendingSetupConfirmation(pendingSetupCandidate)
         ? pendingSetupCandidate
         : undefined;
     const invalidPendingSetup = pendingSetupCandidate !== undefined && !pendingSetup;
@@ -253,8 +258,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     );
                     await applyTransparencyPatch();
                     output.info('activation', '检测到 Workbench 注入缺失，已恢复并请求窗口重载');
-                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
-                    recoveryReloadRequested = true;
+                    try {
+                        await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                        recoveryReloadRequested = true;
+                    } catch (error) {
+                        if (!isExpectedReloadCancellation(error)) {
+                            throw error;
+                        }
+                        // Reload Window 正在关闭旧 Extension Host，取消属于预期移交结果。
+                        recoveryReloadRequested = true;
+                    }
                 } catch (error) {
                     output.error('activation', '恢复 Workbench 壁纸注入失败', error);
                 }
@@ -265,28 +278,45 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const pendingConfirmation = pendingSetup;
-    if (pendingConfirmation && !lifecycle.disabled && !recoveryReloadRequested) {
+    const activeServer = server;
+    if (pendingConfirmation && activeServer && !lifecycle.disabled && !recoveryReloadRequested) {
         const shouldConfirm = shouldConfirmPendingSetup(pendingConfirmation, initialConfig.wallpaperId, Date.now());
         if (restoredServer && shouldConfirm && isPatched()) {
             try {
-                await server.verifyHealth(undefined, {
-                    rootPath: pendingConfirmation.dirPath,
-                    entryFile: pendingConfirmation.fileName
+                await confirmPendingSetupPlayback(pendingConfirmation, {
+                    verifyHealth: confirmation => activeServer.verifyHealth(undefined, {
+                        rootPath: confirmation.dirPath,
+                        entryFile: confirmation.fileName
+                    }),
+                    verifyEntry: () => activeServer.verifyEntry(),
+                    verifyPlaybackReady: playbackType => activeServer.verifyPlaybackReady(playbackType),
+                    clearPendingConfirmation: () => context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined),
+                    report: stage => {
+                        const message = STAGE_MESSAGES[stage];
+                        output.stage(pendingConfirmation.operationId, stage, message);
+                        SettingsPanel.publishSetupState({ status: 'running', stage, message });
+                    }
                 });
-                await server.verifyEntry();
-                await context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined);
-                vscode.window.setStatusBarMessage('$(check) 壁纸已生效', 5000);
-                SettingsPanel.publishSetupState({ status: 'success', message: `壁纸「${pendingConfirmation.wallpaperTitle}」已生效` });
-                await vscode.window.showInformationMessage(`壁纸「${pendingConfirmation.wallpaperTitle}」已设置并生效。`);
-                output.info(pendingConfirmation.operationId, '窗口重载后确认壁纸已生效');
+                vscode.window.setStatusBarMessage('$(check) 壁纸正在播放', 5000);
+                SettingsPanel.publishSetupState({ status: 'success', message: `壁纸「${pendingConfirmation.wallpaperTitle}」正在播放` });
+                await vscode.window.showInformationMessage(`壁纸「${pendingConfirmation.wallpaperTitle}」已加载并正在播放。`);
+                output.info(pendingConfirmation.operationId, '窗口重载后确认壁纸正在播放');
             } catch (error) {
-                output.error(pendingConfirmation.operationId, '窗口重载后验证失败', error);
+                const verificationError = error instanceof WallpaperSetupError
+                    ? error
+                    : new WallpaperSetupError(WallpaperSetupStage.VerifyPlayback, String(error), { cause: error });
+                const reason = toUserErrorReason(verificationError);
+                const playbackFailed = verificationError.stage === WallpaperSetupStage.VerifyPlayback;
+                const failureMessage = playbackFailed
+                    ? `壁纸播放失败：${reason}`
+                    : `壁纸已开始播放，但状态确认失败：${reason}`;
+                output.error(pendingConfirmation.operationId, failureMessage, verificationError);
                 SettingsPanel.publishSetupState({
                     status: 'error',
-                    stage: WallpaperSetupStage.VerifyEntry,
-                    message: '窗口重载后的生效验证失败'
+                    stage: verificationError.stage,
+                    message: failureMessage
                 });
-                const action = await vscode.window.showErrorMessage('壁纸设置已完成，但重载后的生效验证失败。', '查看日志');
+                const action = await vscode.window.showErrorMessage(failureMessage, '查看日志');
                 if (action === '查看日志') { output.show(); }
             }
         } else if (shouldConfirm) {
@@ -299,12 +329,10 @@ export async function activate(context: vscode.ExtensionContext) {
             SettingsPanel.publishSetupState({
                 status: 'error',
                 stage: WallpaperSetupStage.ReloadWorkbench,
-                message: `窗口重载后未确认壁纸生效（${reason}），请查看日志并重试`
+                message: `壁纸播放失败：窗口重载后未恢复播放环境（${reason}）`
             });
-            const action = await vscode.window.showErrorMessage(`壁纸设置已完成，但窗口重载后未确认生效（${reason}）。`, '重试', '查看日志');
-            if (action === '重试') {
-                await vscode.commands.executeCommand('vscode-wallpaper-engine.setWallpaper');
-            } else if (action === '查看日志') {
+            const action = await vscode.window.showErrorMessage(`壁纸设置已保存，但播放环境恢复失败（${reason}）。`, '查看日志');
+            if (action === '查看日志') {
                 output.show();
             }
         } else {

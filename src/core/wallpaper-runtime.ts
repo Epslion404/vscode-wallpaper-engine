@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { PlayableWallpaperType } from './types';
 
 /** 激活阶段用于判断是否需要恢复 Workbench 注入的最小状态。 */
 export interface WallpaperRecoveryState {
@@ -34,6 +35,7 @@ export interface PendingSetupState {
     wallpaperTitle: string;
     dirPath: string;
     fileName: string;
+    playbackType: PlayableWallpaperType;
     createdAt: number;
 }
 
@@ -51,6 +53,9 @@ export function isPendingSetupState(value: unknown): value is PendingSetupState 
         && candidate.dirPath.length > 0
         && typeof candidate.fileName === 'string'
         && candidate.fileName.length > 0
+        && (candidate.playbackType === 'video'
+            || candidate.playbackType === 'image'
+            || candidate.playbackType === 'web')
         && typeof candidate.createdAt === 'number'
         && Number.isFinite(candidate.createdAt);
 }

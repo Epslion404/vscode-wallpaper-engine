@@ -114,4 +114,16 @@ suite('Settings panel message protocol', () => {
         assert.match(webview, /description\?\.enUS/);
         assert.match(webview, /description\?\.zhCN \|\| "",\s*description\?\.enUS \|\| "",\s*key,/);
     });
+
+    test('localizes playback readiness stages and final playback state', () => {
+        const webview = fs.readFileSync(path.join(__dirname, '..', '..', 'media', 'settings.js'), 'utf8');
+
+        assert.match(webview, /正在等待壁纸服务就绪/);
+        assert.match(webview, /壁纸服务已就绪，正在加载壁纸媒体/);
+        assert.match(webview, /壁纸媒体已加载，正在确认播放/);
+        assert.match(webview, /壁纸正在播放，正在完成状态确认/);
+        assert.match(webview, /Wallpaper \"\$\{active\[1\]\}\" is playing/);
+        assert.match(webview, /Wallpaper playback failed/);
+        assert.match(webview, /Wallpaper is playing, but confirmation could not be saved/);
+    });
 });

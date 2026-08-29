@@ -52,6 +52,32 @@ function close(server: http.Server): Promise<void> {
     });
 }
 
+function abortMediaRequest(port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const request = http.get(`http://127.0.0.1:${port}/media/current`, response => {
+            response.once('data', () => {
+                request.destroy();
+                response.destroy();
+                resolve();
+            });
+            response.once('error', error => {
+                if (error.name === 'AbortError' || 'code' in error && error.code === 'ECONNRESET') {
+                    resolve();
+                    return;
+                }
+                reject(error);
+            });
+        });
+        request.once('error', error => {
+            if ('code' in error && error.code === 'ECONNRESET') {
+                resolve();
+                return;
+            }
+            reject(error);
+        });
+    });
+}
+
 suite('WallpaperServer lifecycle and preflight', () => {
     let root: string;
     let server: WallpaperServer | undefined;
@@ -185,6 +211,224 @@ suite('WallpaperServer lifecycle and preflight', () => {
         await server.start(root, 0, 'index.html', root, true);
 
         await assert.rejects(server.triggerReloadAndWait(20), /刷新信号.*超时/);
+    });
+
+    test('current media endpoint supports GET, HEAD and single byte ranges', async () => {
+        const mediaPath = path.join(root, 'current.webm');
+        fs.writeFileSync(mediaPath, '0123456789');
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'current.webm', root, true);
+        const endpoint = `http://127.0.0.1:${server.getCurrentInfo().port}/media/current`;
+
+        const full = await fetch(`${endpoint}?path=../ignored.webm`);
+        assert.strictEqual(full.status, 200);
+        assert.strictEqual(full.headers.get('content-type'), 'video/webm');
+        assert.strictEqual(full.headers.get('content-length'), '10');
+        assert.strictEqual(full.headers.get('accept-ranges'), 'bytes');
+        assert.strictEqual(full.headers.get('cache-control'), 'no-store');
+        assert.strictEqual(full.headers.get('x-content-type-options'), 'nosniff');
+        assert.strictEqual(await full.text(), '0123456789');
+
+        const head = await fetch(endpoint, { method: 'HEAD' });
+        assert.strictEqual(head.status, 200);
+        assert.strictEqual(head.headers.get('content-length'), '10');
+        assert.strictEqual(await head.text(), '');
+
+        const rangedHead = await fetch(endpoint, { method: 'HEAD', headers: { Range: 'bytes=2-5' } });
+        assert.strictEqual(rangedHead.status, 206);
+        assert.strictEqual(rangedHead.headers.get('content-range'), 'bytes 2-5/10');
+        assert.strictEqual(rangedHead.headers.get('content-length'), '4');
+        assert.strictEqual(await rangedHead.text(), '');
+
+        const first = await fetch(endpoint, { headers: { Range: 'bytes=0-3' } });
+        assert.strictEqual(first.status, 206);
+        assert.strictEqual(first.headers.get('content-range'), 'bytes 0-3/10');
+        assert.strictEqual(first.headers.get('content-length'), '4');
+        assert.strictEqual(await first.text(), '0123');
+
+        const openEnded = await fetch(endpoint, { headers: { Range: 'bytes=7-' } });
+        assert.strictEqual(openEnded.status, 206);
+        assert.strictEqual(openEnded.headers.get('content-range'), 'bytes 7-9/10');
+        assert.strictEqual(await openEnded.text(), '789');
+
+        const suffix = await fetch(endpoint, { headers: { Range: 'bytes=-3' } });
+        assert.strictEqual(suffix.status, 206);
+        assert.strictEqual(suffix.headers.get('content-range'), 'bytes 7-9/10');
+        assert.strictEqual(await suffix.text(), '789');
+    });
+
+    test('current media endpoint rejects invalid methods, ranges and paths outside current root', async () => {
+        fs.writeFileSync(path.join(root, 'current.webm'), '0123456789');
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'wallpaper-media-outside-'));
+        const outsideMedia = path.join(outside, 'secret.webm');
+        fs.writeFileSync(outsideMedia, 'secret');
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, 0, outsideMedia, root, true);
+            let endpoint = `http://127.0.0.1:${server.getCurrentInfo().port}/media/current`;
+            const escaped = await fetch(endpoint);
+            assert.strictEqual(escaped.status, 404);
+            assert.strictEqual(escaped.headers.get('cache-control'), 'no-store');
+            assert.strictEqual(escaped.headers.get('x-content-type-options'), 'nosniff');
+
+            await server.start(root, server.getCurrentInfo().port, 'current.webm', root, true);
+            endpoint = `http://127.0.0.1:${server.getCurrentInfo().port}/media/current`;
+            const invalidRanges = ['bytes=20-30', 'bytes=5-4', 'bytes=0-1,3-4', 'items=0-1', 'bytes=-0'];
+            for (const range of invalidRanges) {
+                const response = await fetch(endpoint, { headers: { Range: range } });
+                assert.strictEqual(response.status, 416, range);
+                assert.strictEqual(response.headers.get('content-range'), 'bytes */10');
+                assert.strictEqual(response.headers.get('cache-control'), 'no-store');
+                assert.strictEqual(response.headers.get('x-content-type-options'), 'nosniff');
+            }
+
+            const invalidHead = await fetch(endpoint, { method: 'HEAD', headers: { Range: 'bytes=99-' } });
+            assert.strictEqual(invalidHead.status, 416);
+            assert.strictEqual(invalidHead.headers.get('content-range'), 'bytes */10');
+
+            const post = await fetch(endpoint, { method: 'POST' });
+            assert.strictEqual(post.status, 405);
+            assert.strictEqual(post.headers.get('allow'), 'GET, HEAD');
+            assert.strictEqual(post.headers.get('cache-control'), 'no-store');
+            assert.strictEqual(post.headers.get('x-content-type-options'), 'nosniff');
+            const options = await fetch(endpoint, { method: 'OPTIONS' });
+            assert.strictEqual(options.status, 204);
+            assert.strictEqual(options.headers.get('access-control-allow-methods'), 'GET, HEAD, OPTIONS');
+        } finally {
+            fs.rmSync(outside, { recursive: true, force: true });
+        }
+    });
+
+    test('aborting a current media stream releases it and keeps the server healthy', async () => {
+        fs.writeFileSync(path.join(root, 'large.webm'), Buffer.alloc(8 * 1024 * 1024, 1));
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'large.webm', root, true);
+        const port = server.getCurrentInfo().port;
+
+        await abortMediaRequest(port);
+
+        const head = await fetch(`http://127.0.0.1:${port}/media/current`, { method: 'HEAD' });
+        assert.strictEqual(head.status, 200);
+        await server.verifyHealth();
+    });
+
+    test('playback endpoints validate bounded reports and expose current status', async () => {
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+        const base = `http://127.0.0.1:${server.getCurrentInfo().port}`;
+
+        const idle = await fetch(`${base}/playback-status`);
+        assert.deepStrictEqual(await idle.json(), { state: 'idle' });
+
+        const malformed = await fetch(`${base}/playback-event`, { method: 'POST', body: '{' });
+        assert.strictEqual(malformed.status, 400);
+        const invalid = await fetch(`${base}/playback-event`, {
+            method: 'POST',
+            body: JSON.stringify({ state: 'ready', mediaType: 'audio', event: 'playing' })
+        });
+        assert.strictEqual(invalid.status, 400);
+        const oversized = await fetch(`${base}/playback-event`, { method: 'POST', body: 'x'.repeat(4097) });
+        assert.strictEqual(oversized.status, 413);
+
+        const accepted = await fetch(`${base}/playback-event`, {
+            method: 'POST',
+            body: JSON.stringify({
+                state: 'ready',
+                mediaType: 'video',
+                event: 'time-progress',
+                readyState: 4,
+                networkState: 1,
+                paused: false,
+                currentTime: 1.5
+            })
+        });
+        assert.strictEqual(accepted.status, 204);
+        const status = await fetch(`${base}/playback-status`);
+        const snapshot = await status.json() as { state: string; mediaType: string; event: string };
+        assert.strictEqual(snapshot.state, 'ready');
+        assert.strictEqual(snapshot.mediaType, 'video');
+        assert.strictEqual(snapshot.event, 'time-progress');
+
+        assert.strictEqual((await fetch(`${base}/playback-event`)).status, 405);
+        assert.strictEqual((await fetch(`${base}/playback-status`, { method: 'POST' })).status, 405);
+    });
+
+    test('verifyPlaybackReady resolves ready, rejects errors and times out explicitly', async () => {
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+        const endpoint = `http://127.0.0.1:${server.getCurrentInfo().port}/playback-event`;
+
+        const ready = server.verifyPlaybackReady('video', 1000);
+        await fetch(endpoint, {
+            method: 'POST',
+            body: JSON.stringify({ state: 'ready', mediaType: 'video', event: 'time-progress' })
+        });
+        await ready;
+
+        await server.start(root, server.getCurrentInfo().port, 'index.html', root, true);
+        const failed = server.verifyPlaybackReady('video', 1000);
+        await fetch(endpoint, {
+            method: 'POST',
+            body: JSON.stringify({ state: 'error', mediaType: 'video', event: 'decode-error', errorCode: 3 })
+        });
+        await assert.rejects(failed, /媒体播放失败.*decode-error.*错误码 3/);
+
+        await server.start(root, server.getCurrentInfo().port, 'index.html', root, true);
+        await assert.rejects(server.verifyPlaybackReady('image', 20), /等待 image 播放就绪超时/);
+    });
+
+    test('hot swap resets a previously ready playback snapshot', async () => {
+        fs.writeFileSync(path.join(root, 'other.html'), '<!doctype html><html><body>other</body></html>');
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+        const port = server.getCurrentInfo().port;
+        await fetch(`http://127.0.0.1:${port}/playback-event`, {
+            method: 'POST',
+            body: JSON.stringify({ state: 'ready', mediaType: 'web', event: 'iframe-load' })
+        });
+        await server.verifyPlaybackReady('web', 50);
+
+        await server.start(root, port, 'other.html', root, true);
+
+        await assert.rejects(server.verifyPlaybackReady('web', 20), /等待 web 播放就绪超时/);
+        const status = await fetch(`http://127.0.0.1:${port}/playback-status`);
+        assert.deepStrictEqual(await status.json(), { state: 'idle' });
+    });
+
+    test('verifyPlaybackReady reads a reused external server instead of local monitor state', async () => {
+        const external = http.createServer((request, response) => {
+            if (request.url === '/status') {
+                response.setHeader('Content-Type', 'application/json');
+                response.end(JSON.stringify({
+                    running: true,
+                    rootPath: root,
+                    entryFile: 'index.html'
+                }));
+                return;
+            }
+            if (request.url === '/playback-status') {
+                response.setHeader('Content-Type', 'application/json');
+                response.end(JSON.stringify({
+                    state: 'ready',
+                    mediaType: 'web',
+                    event: 'iframe-load',
+                    updatedAt: Date.now()
+                }));
+                return;
+            }
+            response.statusCode = 404;
+            response.end();
+        });
+        const port = await listen(external);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await server.verifyPlaybackReady('web', 500);
+        } finally {
+            await close(external);
+        }
     });
 
     test('clearPersistedWallpaperState clears recovery and pending setup keys', async () => {

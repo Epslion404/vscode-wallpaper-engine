@@ -76,8 +76,17 @@ suite('Wallpaper Runtime Test Suite', () => {
             wallpaperTitle: 'Demo',
             dirPath: 'E:/workshop/123',
             fileName: 'index.html',
+            playbackType: 'web',
             createdAt: 2000
         }), true);
+        assert.strictEqual(isPendingSetupState({
+            operationId: 'op',
+            wallpaperId: '123',
+            wallpaperTitle: 'Demo',
+            dirPath: 'E:/workshop/123',
+            fileName: 'index.html',
+            createdAt: 2000
+        }), false);
         assert.strictEqual(isPendingSetupState({ wallpaperId: '123' }), false);
         assert.strictEqual(isPendingSetupState(null), false);
     });

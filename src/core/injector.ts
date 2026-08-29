@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { toVsCodeResourceUrl } from '../utils'; 
 import { saveFilePrivileged } from './admin-saver';
 import { WallpaperType } from './types';
 import { getThemeCompatibilityCss } from './theme-compatibility';
@@ -10,7 +9,7 @@ import { getThemeCompatibilityCss } from './theme-compatibility';
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
-const JS_INJECTION_VERSION = '4';
+const JS_INJECTION_VERSION = '5';
 const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
@@ -104,6 +103,9 @@ export function getWorkbenchTransparencyCss(): string {
         '.monaco-workbench {',
         '  background: transparent !important;',
         '  --modern-ui-shell-background: transparent !important;',
+        '  position: relative !important;',
+        '  z-index: 1 !important;',
+        '  isolation: isolate !important;',
         '}',
         '.monaco-workbench.floating-panels,',
         '.monaco-workbench.floating-panels > .monaco-grid-view,',
@@ -113,8 +115,12 @@ export function getWorkbenchTransparencyCss(): string {
     ].join(' ');
 }
 
-function addSourceToDirective(content: string, directive: string, source: string): string {
+export function addSourceToDirective(content: string, directive: string, source: string): string {
     const directivePattern = new RegExp(`(${directive}\\s+)([^;]*)(;)`, 'i');
+    if (!directivePattern.test(content)) {
+        const separator = content.trimEnd().endsWith(';') ? ' ' : '; ';
+        return `${content.trimEnd()}${separator}${directive} ${source};`;
+    }
     return content.replace(directivePattern, (_match, prefix: string, sources: string, suffix: string) => {
         const cleanedSources = sources.replace(LOCAL_SERVER_ORIGIN_PATTERN, '').replace(/\s+/g, ' ').trim();
         return `${prefix}${cleanedSources} ${source}${suffix}`;
@@ -247,6 +253,7 @@ async function patchWorkbenchHtml(port: number) {
     const serverOrigin = `http://127.0.0.1:${port}`;
     let restrictedContent = addSourceToDirective(contentMatch[1], 'frame-src', serverOrigin);
     restrictedContent = addSourceToDirective(restrictedContent, 'connect-src', serverOrigin);
+    restrictedContent = addSourceToDirective(restrictedContent, 'media-src', serverOrigin);
     const patchedTag = originalTag.replace(contentRegex, `content="${restrictedContent}"`);
 
     console.log(`[Wallpaper] Allowing local server in Workbench CSP: ${serverOrigin}`);
@@ -254,29 +261,99 @@ async function patchWorkbenchHtml(port: number) {
     await saveFilePrivileged(targetHtml, html);
     ensureInjectionWritten(fs.readFileSync(targetHtml, 'utf-8'), patchedTag, targetHtml);
 }
-async function injectJs(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
+async function injectJs(type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
     const jsPath = getWorkbenchPath('js');
     if (!jsPath) { throw new Error('未找到 Workbench JavaScript 文件'); }
     
     let elementCreationCode = '';
 
     if (type === WallpaperType.Video) {
-        const finalUrl = toVsCodeResourceUrl(mediaPath);
         elementCreationCode = `
             el = document.createElement('video');
-            el.src = "${finalUrl}";
+            el.src = SERVER_ROOT + '/media/current';
+            el.preload = 'auto';
             el.autoplay = true;
             el.loop = true;
             el.muted = true;
-            el.play();
+            el.defaultMuted = true;
+            el.playsInline = true;
             el.style.opacity = '${opacity}';
+
+            const videoEvents = [
+                'loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing',
+                'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended'
+            ];
+            let progressTimer = 0;
+            cleanupTasks.push(() => window.clearTimeout(progressTimer));
+            videoEvents.forEach(eventName => {
+                el.addEventListener(eventName, () => {
+                    reportPlayback('loading', eventName, mediaSnapshot(el));
+                    if (eventName === 'playing') {
+                        const startedAt = el.currentTime;
+                        window.clearTimeout(progressTimer);
+                        progressTimer = window.setTimeout(() => {
+                            if (!el.paused && el.currentTime > startedAt + 0.05) {
+                                playbackReady = true;
+                                reportPlayback('ready', 'time-progress', mediaSnapshot(el));
+                            }
+                        }, 750);
+                    }
+                });
+            });
+            el.addEventListener('error', () => {
+                reportPlayback('error', 'media-error', {
+                    ...mediaSnapshot(el),
+                    errorCode: el.error ? el.error.code : 0,
+                    detail: el.error ? el.error.message : 'unknown media error'
+                });
+            });
+            let playbackWatchdog = 0;
+            window.reloadWallpaper = () => {
+                playbackReady = false;
+                window.clearTimeout(playbackWatchdog);
+                el.load();
+                try {
+                    Promise.resolve(el.play()).catch(error => {
+                        reportPlayback('error', 'play-rejected', {
+                            ...mediaSnapshot(el),
+                            detail: String(error)
+                        });
+                    });
+                } catch (error) {
+                    reportPlayback('error', 'play-rejected', {
+                        ...mediaSnapshot(el),
+                        detail: String(error)
+                    });
+                }
+                playbackWatchdog = window.setTimeout(() => {
+                    if (!playbackReady) {
+                        reportPlayback('error', 'watchdog-timeout', mediaSnapshot(el));
+                    }
+                }, 12000);
+            };
+            cleanupTasks.push(() => window.clearTimeout(playbackWatchdog));
         `;
     } else if (type === WallpaperType.Image) {
-        const finalUrl = toVsCodeResourceUrl(mediaPath);
         elementCreationCode = `
             el = document.createElement('img');
-            el.src = "${finalUrl}";
             el.style.opacity = '${opacity}';
+            el.addEventListener('load', () => {
+                reportPlayback('loading', 'load', {});
+                Promise.resolve(el.decode()).then(() => {
+                    playbackReady = true;
+                    reportPlayback('ready', 'decode', {});
+                }).catch(error => {
+                    reportPlayback('error', 'decode-error', { detail: String(error) });
+                });
+            });
+            el.addEventListener('error', () => {
+                reportPlayback('error', 'load-error', { detail: 'image load failed' });
+            });
+            window.reloadWallpaper = () => {
+                playbackReady = false;
+                el.removeAttribute('src');
+                el.src = SERVER_ROOT + '/media/current';
+            };
         `;
     } else if (type === WallpaperType.Web) {
         const pingUrl = `http://127.0.0.1:${port}/ping`;
@@ -333,6 +410,11 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
 
             el.onload = () => {
                 window.showWallpaper();
+                playbackReady = true;
+                reportPlayback('ready', 'load', {});
+            };
+            el.onerror = () => {
+                reportPlayback('error', 'load-error', { detail: 'iframe load failed' });
             };
         `;
     }
@@ -347,22 +429,49 @@ async function injectJs(mediaPath: string, type: WallpaperType, opacity: number,
     }})()}
     `;
 
+    const playbackMediaType = type === WallpaperType.Video
+        ? 'video'
+        : type === WallpaperType.Image ? 'image' : 'web';
     const jsInjection = `
 /* [VSCode-Wallpaper-Injection-Start] */
 ${JS_INJECTION_VERSION_MARKER}
 (function() {
     try {
+        const runtimeKey = '__vscodeWallpaperRuntimeV5';
+        let container;
+        const previousRuntime = window[runtimeKey];
+        if (previousRuntime && typeof previousRuntime.cleanup === 'function') {
+            previousRuntime.cleanup();
+        }
         const oldContainer = document.getElementById('vscode-wallpaper-container');
         if (oldContainer) oldContainer.remove();
 
-        const container = document.createElement('div');
+        let disposed = false;
+        let playbackReady = false;
+        const cleanupTasks = [];
+        const cleanup = () => {
+            if (disposed) return;
+            disposed = true;
+            while (cleanupTasks.length > 0) {
+                try { cleanupTasks.pop()(); } catch (error) {
+                    console.warn('[WP] Runtime cleanup failed', error);
+                }
+            }
+            if (container && container.isConnected) container.remove();
+            if (window[runtimeKey] && window[runtimeKey].cleanup === cleanup) {
+                delete window[runtimeKey];
+            }
+        };
+        window[runtimeKey] = { cleanup };
+
+        container = document.createElement('div');
         container.id = 'vscode-wallpaper-container';
         container.style.position = 'fixed'; 
         container.style.top = '0'; 
         container.style.left = '0'; 
         container.style.width = '100%'; 
         container.style.height = '100%';
-        container.style.zIndex = '-1';
+        container.style.zIndex = '0';
         container.style.pointerEvents = 'none';
         container.style.opacity = '1';
         container.style.display = 'flex';
@@ -370,11 +479,82 @@ ${JS_INJECTION_VERSION_MARKER}
         const SERVER_ROOT = 'http://127.0.0.1:${port}';
         const PING_URL = SERVER_ROOT + '/ping';
         const CONFIG_URL = SERVER_ROOT + '/config';
+        const PLAYBACK_EVENT_URL = SERVER_ROOT + '/playback-event';
+        const MEDIA_TYPE = '${playbackMediaType}';
+        const lastPlaybackEvents = new Map();
+        let lastPlaybackReportAt = 0;
+
+        const reportPlayback = (state, event, fields) => {
+            if (disposed) return;
+            const now = Date.now();
+            const eventKey = state + ':' + event;
+            if ((lastPlaybackEvents.get(eventKey) || 0) + 1000 > now) return;
+            if (state === 'loading' && lastPlaybackReportAt + 150 > now) return;
+            lastPlaybackEvents.set(eventKey, now);
+            lastPlaybackReportAt = now;
+            const detail = !fields || fields.detail === undefined
+                ? undefined
+                : String(fields.detail).slice(0, 160);
+            const payload = {
+                state,
+                mediaType: MEDIA_TYPE,
+                event,
+                ...(fields && Number.isFinite(fields.readyState) ? { readyState: fields.readyState } : {}),
+                ...(fields && Number.isFinite(fields.networkState) ? { networkState: fields.networkState } : {}),
+                ...(fields && typeof fields.paused === 'boolean' ? { paused: fields.paused } : {}),
+                ...(fields && Number.isFinite(fields.currentTime) ? { currentTime: fields.currentTime } : {}),
+                ...(fields && Number.isFinite(fields.errorCode) ? { errorCode: fields.errorCode } : {}),
+                ...(detail === undefined ? {} : { detail })
+            };
+            fetch(PLAYBACK_EVENT_URL, {
+                method: 'POST',
+                mode: 'no-cors',
+                keepalive: true,
+                body: JSON.stringify(payload)
+            }).catch(error => console.warn('[WP] Playback report failed', error));
+        };
+        const mediaSnapshot = media => ({
+            readyState: media.readyState,
+            networkState: media.networkState,
+            paused: media.paused,
+            currentTime: media.currentTime
+        });
+        reportPlayback('loading', 'created', {});
 
         // [Fix] Force transparent background for workbench container
         const baseStyle = document.createElement('style');
+        baseStyle.id = 'vscode-wallpaper-base-style';
         baseStyle.textContent = ${JSON.stringify(getWorkbenchTransparencyCss())};
         document.head.appendChild(baseStyle);
+        cleanupTasks.push(() => baseStyle.remove());
+
+        const managedInlineStyles = new Map();
+        const setManagedStyle = (element, property, value, priority) => {
+            let properties = managedInlineStyles.get(element);
+            if (!properties) {
+                properties = new Map();
+                managedInlineStyles.set(element, properties);
+            }
+            if (!properties.has(property)) {
+                properties.set(property, {
+                    value: element.style.getPropertyValue(property),
+                    priority: element.style.getPropertyPriority(property)
+                });
+            }
+            element.style.setProperty(property, value, priority);
+        };
+        cleanupTasks.push(() => {
+            managedInlineStyles.forEach((properties, element) => {
+                properties.forEach((original, property) => {
+                    if (original.value) {
+                        element.style.setProperty(property, original.value, original.priority);
+                    } else {
+                        element.style.removeProperty(property);
+                    }
+                });
+            });
+            managedInlineStyles.clear();
+        });
 
         // Workbench 会在启动和切换主题时动态重建 modern UI shell；用内联 !important
         // 重新确认关键层透明，并监听布局变化，避免后加载样式覆盖壁纸。
@@ -383,23 +563,27 @@ ${JS_INJECTION_VERSION_MARKER}
             if (workbench instanceof HTMLElement) {
                 if (workbench.style.getPropertyValue('--modern-ui-shell-background') !== 'transparent'
                     || workbench.style.getPropertyPriority('--modern-ui-shell-background') !== 'important') {
-                    workbench.style.setProperty('--modern-ui-shell-background', 'transparent', 'important');
+                    setManagedStyle(workbench, '--modern-ui-shell-background', 'transparent', 'important');
                 }
             }
             document.querySelectorAll('.monaco-grid-view').forEach(element => {
                 if (!(element instanceof HTMLElement)) { return; }
                 if (element.style.getPropertyValue('background-color') !== 'transparent'
                     || element.style.getPropertyPriority('background-color') !== 'important') {
-                    element.style.setProperty('background-color', 'transparent', 'important');
+                    setManagedStyle(element, 'background-color', 'transparent', 'important');
                 }
                 if (element.style.getPropertyValue('background') !== 'transparent'
                     || element.style.getPropertyPriority('background') !== 'important') {
-                    element.style.setProperty('background', 'transparent', 'important');
+                    setManagedStyle(element, 'background', 'transparent', 'important');
                 }
             });
         };
         let transparencyFrame = 0;
+        cleanupTasks.push(() => {
+            if (transparencyFrame !== 0) window.cancelAnimationFrame(transparencyFrame);
+        });
         const scheduleTransparencyEnforcement = () => {
+            if (disposed) return;
             if (transparencyFrame !== 0) { return; }
             transparencyFrame = window.requestAnimationFrame(() => {
                 transparencyFrame = 0;
@@ -415,15 +599,18 @@ ${JS_INJECTION_VERSION_MARKER}
             attributes: true,
             attributeFilter: ['class', 'style']
         });
+        cleanupTasks.push(() => transparencyObserver.disconnect());
 
         // Inject Transparency CSS
         const transparencyStyle = document.createElement('style');
         transparencyStyle.id = 'vscode-wallpaper-transparency';
         document.head.appendChild(transparencyStyle);
+        cleanupTasks.push(() => transparencyStyle.remove());
 
         const themeCompatibilityStyle = document.createElement('style');
         themeCompatibilityStyle.id = 'vscode-wallpaper-theme-compatibility';
         document.head.appendChild(themeCompatibilityStyle);
+        cleanupTasks.push(() => themeCompatibilityStyle.remove());
 
         async function updateCss() {
             try {
@@ -454,7 +641,7 @@ ${JS_INJECTION_VERSION_MARKER}
         async function mainLoop() {
             // 1. Wait for server
             const start = Date.now();
-            while (true) {
+            while (!disposed) {
                 try {
                     const resp = await fetch(PING_URL, { method: 'GET', mode: 'cors' });
                     if (resp.ok || resp.status === 205) {
@@ -462,9 +649,10 @@ ${JS_INJECTION_VERSION_MARKER}
                         break;
                     }
                 } catch (e) { }
-                await new Promise(resolve => setTimeout(resolve, 200));
+                await new Promise(resolve => setTimeout(resolve, ${startupCheckInterval}));
                 if (Date.now() - start > 30000) { console.error("[WP] Server timeout"); return; }
             }
+            if (disposed) return;
 
             // 2. Initialize
             await updateCss();
@@ -472,8 +660,9 @@ ${JS_INJECTION_VERSION_MARKER}
             if (window.reloadWallpaper) window.reloadWallpaper();
             
             // 3. Monitor Loop
-            while(true) {
+            while(!disposed) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
+                if (disposed) return;
                 try {
                     const resp = await fetch(PING_URL, { method: 'GET', mode: 'cors' });
                     if (resp.status === 205) {
@@ -485,7 +674,7 @@ ${JS_INJECTION_VERSION_MARKER}
                     console.warn("[WP] Server disconnected...");
                     if (window.hideWallpaper) window.hideWallpaper();
                     // Re-enter wait loop
-                    mainLoop(); 
+                    mainLoop();
                     return;
                 }
             }
@@ -608,14 +797,37 @@ ${JS_INJECTION_VERSION_MARKER}
         container.appendChild(wrapper);
         document.body.appendChild(container);
 
+        let containerRestoreCount = 0;
+        const removalObserver = new MutationObserver(() => {
+            if (disposed || container.isConnected) return;
+            if (containerRestoreCount < 1 && document.body) {
+                containerRestoreCount += 1;
+                document.body.appendChild(container);
+                reportPlayback('loading', 'container-restored', {});
+                enforceWorkbenchTransparency();
+                return;
+            }
+            reportPlayback('error', 'container-removed', {
+                detail: 'wallpaper container was removed repeatedly'
+            });
+            cleanup();
+        });
+        removalObserver.observe(document.body, { childList: true, subtree: true });
+        cleanupTasks.push(() => removalObserver.disconnect());
+
         // Resize handler: Reload iframe on window resize
         if (el.tagName === 'IFRAME') {
              let resizeTimeout;
-             window.addEventListener('resize', () => {
+             const handleResize = () => {
                  clearTimeout(resizeTimeout);
                  resizeTimeout = setTimeout(() => {
                       el.src = entryUrl;
                  }, ${resizeDelay});
+             };
+             window.addEventListener('resize', handleResize);
+             cleanupTasks.push(() => {
+                 window.removeEventListener('resize', handleResize);
+                 clearTimeout(resizeTimeout);
              });
         }
 
@@ -633,11 +845,11 @@ ${JS_INJECTION_VERSION_MARKER}
     );
 }
 
-export async function performInjection(mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
+export async function performInjection(_mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
     await executeInjection({
         patchHtml: () => patchWorkbenchHtml(port),
         injectJavaScript: () => (
-            injectJs(mediaPath, type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar)
+            injectJs(type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar)
         ),
         reloadWorkbench: async () => {
             vscode.window.setStatusBarMessage('Wallpaper installed. Restarting...', 5000);

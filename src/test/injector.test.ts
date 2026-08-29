@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+    addSourceToDirective,
     ensureInjectionWritten,
     executeInjection,
     getWorkbenchTransparencyCss,
@@ -30,6 +31,22 @@ suite('Injector security boundary', () => {
         assert.ok(!source.includes("script-src * 'unsafe-inline'"));
         assert.match(source, /addSourceToDirective\(contentMatch\[1\], 'frame-src', serverOrigin\)/);
         assert.match(source, /addSourceToDirective\(restrictedContent, 'connect-src', serverOrigin\)/);
+        assert.match(source, /addSourceToDirective\(restrictedContent, 'media-src', serverOrigin\)/);
+    });
+
+    test('CSP helper adds a missing directive and replaces stale loopback origins', () => {
+        assert.strictEqual(
+            addSourceToDirective("default-src 'none';", 'media-src', 'http://127.0.0.1:23333'),
+            "default-src 'none'; media-src http://127.0.0.1:23333;",
+        );
+        assert.strictEqual(
+            addSourceToDirective(
+                "media-src 'self' http://127.0.0.1:12345;",
+                'media-src',
+                'http://127.0.0.1:23333',
+            ),
+            "media-src 'self' http://127.0.0.1:23333;",
+        );
     });
 
     test('Workbench root layers remain transparent so the wallpaper can stay behind the UI', () => {
@@ -40,12 +57,80 @@ suite('Injector security boundary', () => {
         assert.match(css, /background:\s*transparent\s*!important/);
         assert.match(css, /--modern-ui-shell-background:\s*transparent\s*!important/);
         assert.match(css, /\.monaco-grid-view/);
+        assert.match(css, /z-index:\s*1\s*!important/);
+        assert.match(css, /isolation:\s*isolate\s*!important/);
     });
 
     test('runtime reasserts shell transparency after Workbench theme updates', () => {
-        assert.match(source, /setProperty\(['"]--modern-ui-shell-background['"],\s*['"]transparent['"],\s*['"]important['"]\)/);
-        assert.match(source, /setProperty\(['"]background-color['"],\s*['"]transparent['"],\s*['"]important['"]\)/);
+        assert.match(source, /setManagedStyle\(workbench,\s*'--modern-ui-shell-background',\s*'transparent',\s*'important'\)/);
+        assert.match(source, /setManagedStyle\(element,\s*'background-color',\s*'transparent',\s*'important'\)/);
         assert.match(source, /MutationObserver/);
+        assert.match(source, /managedInlineStyles/);
+        assert.match(source, /original\.priority/);
+    });
+
+    test('video uses the bounded loopback media endpoint without embedding its absolute path', () => {
+        const videoBranch = source.slice(
+            source.indexOf('if (type === WallpaperType.Video)'),
+            source.indexOf('} else if (type === WallpaperType.Image)'),
+        );
+        assert.match(videoBranch, /SERVER_ROOT \+ '\/media\/current'/);
+        assert.ok(!videoBranch.includes('toVsCodeResourceUrl'));
+        assert.match(videoBranch, /preload = 'auto'/);
+        assert.match(videoBranch, /autoplay = true/);
+        assert.match(videoBranch, /loop = true/);
+        assert.match(videoBranch, /muted = true/);
+        assert.match(videoBranch, /playsInline = true/);
+        assert.match(videoBranch, /\.load\(\)/);
+        assert.match(videoBranch, /Promise\.resolve\(el\.play\(\)\)\.catch/);
+        assert.match(videoBranch, /catch \(error\)/);
+    });
+
+    test('image also uses the loopback media endpoint without embedding its absolute path', () => {
+        const imageBranch = source.slice(
+            source.indexOf('} else if (type === WallpaperType.Image)'),
+            source.indexOf('} else if (type === WallpaperType.Web)'),
+        );
+        assert.match(imageBranch, /SERVER_ROOT \+ '\/media\/current'/);
+        assert.ok(!imageBranch.includes('toVsCodeResourceUrl'));
+        assert.match(imageBranch, /window\.reloadWallpaper = \(\) =>/);
+    });
+
+    test('injected runtime reports bounded playback health for every media type', () => {
+        for (const eventName of [
+            'loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing',
+            'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended', 'error',
+        ]) {
+            assert.ok(source.includes(`'${eventName}'`), `missing ${eventName} listener`);
+        }
+        assert.match(source, /PLAYBACK_EVENT_URL = SERVER_ROOT \+ '\/playback-event'/);
+        assert.match(source, /method: 'POST'/);
+        assert.match(source, /mode: 'no-cors'/);
+        assert.ok(!source.includes("headers: { 'Content-Type': 'application/json' }"));
+        assert.match(source, /String\(fields\.detail\)\.slice\(0, 160\)/);
+        assert.match(source, /lastPlaybackEvents/);
+        assert.match(source, /currentTime > startedAt \+ 0\.05/);
+        assert.match(source, /'ready', 'time-progress'/);
+        assert.match(source, /'error', 'watchdog-timeout'/);
+        assert.match(source, /Promise\.resolve\(el\.decode\(\)\)/);
+        assert.match(source, /'ready', 'decode'/);
+        assert.match(source, /el\.onload = \(\) =>/);
+        assert.match(source, /'ready', 'load'/);
+        assert.match(source, /el\.onerror = \(\) =>/);
+    });
+
+    test('runtime layering and cleanup are stable across reinjection and removal', () => {
+        assert.match(source, /container\.style\.zIndex = '0'/);
+        assert.match(source, /__vscodeWallpaperRuntimeV5/);
+        assert.match(source, /previousRuntime\.cleanup\(\)/);
+        assert.match(source, /let container;/);
+        assert.match(source, /if \(disposed\) return/);
+        assert.match(source, /removalObserver/);
+        assert.match(source, /containerRestoreCount < 1/);
+        assert.match(source, /'loading', 'container-restored'/);
+        assert.match(source, /'error', 'container-removed'/);
+        assert.match(source, /transparencyObserver\.disconnect\(\)/);
+        assert.match(source, /removeEventListener\('resize', handleResize\)/);
     });
 
     test('Workbench restoration delegates user feedback to the extension host', () => {
@@ -71,6 +156,10 @@ suite('Injector security boundary', () => {
         );
         assert.strictEqual(
             hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:4] */'),
+            false,
+        );
+        assert.strictEqual(
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:5] */'),
             true,
         );
     });
