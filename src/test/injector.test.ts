@@ -5,9 +5,13 @@ import {
     addSourceToDirective,
     ensureInjectionWritten,
     executeInjection,
+    getWorkbenchPathCandidates,
     getWorkbenchTransparencyCss,
     hasCurrentInjection,
+    patchWorkbenchCspContent,
     runInjectionStep,
+    selectWorkbenchPath,
+    stripManagedLocalOriginsFromCspContent,
     WorkbenchInjectionError,
 } from '../core/injector';
 
@@ -29,9 +33,10 @@ suite('Injector security boundary', () => {
     test('Workbench CSP remains restrictive', () => {
         assert.ok(!source.includes('default-src *'));
         assert.ok(!source.includes("script-src * 'unsafe-inline'"));
-        assert.match(source, /addSourceToDirective\(contentMatch\[1\], 'frame-src', serverOrigin\)/);
-        assert.match(source, /addSourceToDirective\(restrictedContent, 'connect-src', serverOrigin\)/);
-        assert.match(source, /addSourceToDirective\(restrictedContent, 'media-src', serverOrigin\)/);
+        assert.match(source, /patchWorkbenchCspContent\(contentMatch\[1\], port\)/);
+        for (const directive of ['frame-src', 'connect-src', 'media-src', 'img-src']) {
+            assert.ok(source.includes(`'${directive}'`));
+        }
     });
 
     test('CSP helper adds a missing directive and replaces stale loopback origins', () => {
@@ -47,6 +52,49 @@ suite('Injector security boundary', () => {
             ),
             "media-src 'self' http://127.0.0.1:23333;",
         );
+    });
+
+    test('Workbench CSP authorizes only the current loopback origin for every media directive', () => {
+        const patched = patchWorkbenchCspContent(
+            "default-src 'none'; img-src 'self' http://127.0.0.1:12345;",
+            23333,
+        );
+
+        for (const directive of ['frame-src', 'connect-src', 'media-src', 'img-src']) {
+            assert.match(patched, new RegExp(`${directive}[^;]*http://127\\.0\\.0\\.1:23333`));
+        }
+        assert.match(patched, /img-src 'self' http:\/\/127\.0\.0\.1:23333/);
+        assert.ok(!patched.includes('http://127.0.0.1:12345'));
+        assert.ok(!patched.includes('unsafe-inline'));
+        assert.ok(!patched.includes('unsafe-eval'));
+    });
+
+    test('CSP restoration removes loopback origins only from extension-managed directives', () => {
+        const restored = stripManagedLocalOriginsFromCspContent(
+            "script-src 'self' http://127.0.0.1:9000; img-src 'self' http://127.0.0.1:23333; media-src http://127.0.0.1:23333;",
+        );
+
+        assert.match(restored, /script-src 'self' http:\/\/127\.0\.0\.1:9000/);
+        assert.match(restored, /img-src 'self';/);
+        assert.ok(!restored.includes('media-src http://127.0.0.1:23333'));
+    });
+
+    test('Workbench HTML and JavaScript candidates are selected independently and deterministically', () => {
+        const root = path.join('C:', 'VSCode', 'resources', 'app');
+        const htmlCandidates = getWorkbenchPathCandidates(root, 'html');
+        const jsCandidates = getWorkbenchPathCandidates(root, 'js');
+
+        assert.match(htmlCandidates[0], /electron-browser[\\/]workbench[\\/]workbench\.html$/);
+        assert.match(jsCandidates[jsCandidates.length - 1], /out[\\/]vs[\\/]workbench[\\/]workbench\.desktop\.main\.js$/);
+        assert.strictEqual(
+            selectWorkbenchPath(htmlCandidates, candidate => candidate === htmlCandidates[0]),
+            htmlCandidates[0],
+        );
+        assert.strictEqual(
+            selectWorkbenchPath(jsCandidates, candidate => candidate === jsCandidates[jsCandidates.length - 1]),
+            jsCandidates[jsCandidates.length - 1],
+        );
+        assert.strictEqual(selectWorkbenchPath(jsCandidates, () => false), null);
     });
 
     test('Workbench root layers remain transparent so the wallpaper can stay behind the UI', () => {
@@ -131,6 +179,7 @@ suite('Injector security boundary', () => {
         assert.match(source, /'ready', 'time-progress'/);
         assert.match(source, /failed\(token, 'watchdog-timeout'\)/);
         assert.match(source, /'error', 'retry-exhausted'/);
+        assert.match(source, /const failureFields = \{[\s\S]*errorCode:[\s\S]*reportPlayback\('error', 'retry-exhausted', failureFields\)/);
         assert.match(source, /Promise\.resolve\(el\.decode\(\)\)/);
         assert.match(source, /'ready', 'decode'/);
         assert.match(source, /el\.onload = \(\) =>/);

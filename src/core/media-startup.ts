@@ -112,7 +112,7 @@ export function createMediaStartupController(
         },
         failed: failActive,
         ready: token => {
-            if (!isActive(token) || (phase !== 'attaching' && phase !== 'retry-wait')) {
+            if (!isActive(token) || phase !== 'attaching') {
                 return;
             }
             cancelPendingRetry();

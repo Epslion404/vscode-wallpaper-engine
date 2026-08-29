@@ -106,7 +106,7 @@ suite('Media Startup Controller', () => {
         assert.strictEqual(reports.filter(event => event === 'retry-exhausted').length, 1);
     });
 
-    test('ready cancels a pending retry and ignores its late callback', () => {
+    test('late ready after a failed attempt does not cancel its retry', () => {
         const attempts: MediaStartupAttempt[] = [];
         const scheduled: ScheduledTask[] = [];
         const controller = createMediaStartupController({
@@ -123,10 +123,30 @@ suite('Media Startup Controller', () => {
         controller.failed(token(1, 1), 'load-error');
         controller.ready(token(1, 1));
         scheduled[0].callback();
+
+        assert.strictEqual(scheduled[0].canceled, false);
+        assert.deepStrictEqual(attempts, [token(1, 1), token(1, 2)]);
+    });
+
+    test('ready while attaching prevents later failure from scheduling a retry', () => {
+        const scheduled: ScheduledTask[] = [];
+        const reports: string[] = [];
+        const controller = createMediaStartupController({
+            attachSource: () => undefined,
+            schedule: (delayMs, callback) => {
+                const task = { delayMs, callback, canceled: false };
+                scheduled.push(task);
+                return () => { task.canceled = true; };
+            },
+            report: event => { reports.push(event); }
+        }, { maxAttempts: 3, retryDelayMs: 250 });
+
+        controller.start();
+        controller.ready(token(1, 1));
         controller.failed(token(1, 1), 'late-load-error');
 
-        assert.strictEqual(scheduled[0].canceled, true);
-        assert.deepStrictEqual(attempts, [token(1, 1)]);
+        assert.strictEqual(scheduled.length, 0);
+        assert.strictEqual(reports.filter(event => event === 'ready').length, 1);
     });
 
     test('restart cancels an old retry and ignores its queued callback', () => {

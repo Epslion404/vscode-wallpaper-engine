@@ -22,6 +22,7 @@ const ATTR_ORIGINAL = 'http-equiv="Content-Security-Policy"';
 const ATTR_RENAMED = 'http-equiv="Content-Security-Policy--replaced-by-wallpaper-engine-plugin"';
 
 const LOCAL_SERVER_ORIGIN_PATTERN = /http:\/\/127\.0\.0\.1:\d+/g;
+const MANAGED_CSP_DIRECTIVES = ['frame-src', 'connect-src', 'media-src', 'img-src'] as const;
 
 export type InjectionStage = 'html' | 'javascript' | 'reload';
 
@@ -128,26 +129,67 @@ export function addSourceToDirective(content: string, directive: string, source:
     });
 }
 
+/** 为 Workbench 原 CSP 增加当前回环服务，不放宽脚本或任意外部来源。 */
+export function patchWorkbenchCspContent(content: string, port: number): string {
+    const serverOrigin = `http://127.0.0.1:${port}`;
+    return MANAGED_CSP_DIRECTIVES.reduce(
+        (restrictedContent, directive) => addSourceToDirective(restrictedContent, directive, serverOrigin),
+        content,
+    );
+}
+
+/** 还原时仅清理扩展管理的 CSP 指令，避免删除用户其他指令中的本地来源。 */
+export function stripManagedLocalOriginsFromCspContent(content: string): string {
+    return MANAGED_CSP_DIRECTIVES.reduce((cleanedContent, directive) => {
+        const directivePattern = new RegExp(`(${directive}\\s+)([^;]*)(;)`, 'i');
+        return cleanedContent.replace(directivePattern, (_match, prefix: string, sources: string, suffix: string) => {
+            const cleanedSources = sources.replace(LOCAL_SERVER_ORIGIN_PATTERN, '').replace(/\s+/g, ' ').trim();
+            return cleanedSources ? `${prefix}${cleanedSources}${suffix}` : '';
+        });
+    }, content).replace(/\s+/g, ' ').trim();
+}
+
 function stripLocalServerOriginsFromCsp(html: string): string {
     const cspPattern = /(<meta[\s\S]*?http-equiv="Content-Security-Policy"[\s\S]*?content=")([\s\S]*?)("\s*\/?>)/i;
     return html.replace(cspPattern, (_match, prefix: string, content: string, suffix: string) => {
-        return `${prefix}${content.replace(LOCAL_SERVER_ORIGIN_PATTERN, '').replace(/\s+/g, ' ').trim()}${suffix}`;
+        return `${prefix}${stripManagedLocalOriginsFromCspContent(content)}${suffix}`;
     });
 }
 
-function getWorkbenchPath(file: 'html' | 'js'): string | null {
-    const root = vscode.env.appRoot;
+export type WorkbenchFile = 'html' | 'js';
+
+/** 分别生成 HTML 与 JavaScript 候选，兼容 VS Code 不同 Electron 布局。 */
+export function getWorkbenchPathCandidates(root: string, file: WorkbenchFile): string[] {
     const basePaths = [
         path.join(root, 'out', 'vs', 'code', 'electron-browser', 'workbench'),
         path.join(root, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
         path.join(root, 'out', 'vs', 'workbench')
     ];
     const filename = file === 'html' ? 'workbench.html' : 'workbench.desktop.main.js';
-    for (const basePath of basePaths) {
-        const fullPath = path.join(basePath, filename);
-        if (fs.existsSync(fullPath)) { return fullPath; }
+    return basePaths.map(basePath => path.join(basePath, filename));
+}
+
+export function selectWorkbenchPath(
+    candidates: readonly string[],
+    exists: (candidate: string) => boolean,
+): string | null {
+    for (const candidate of candidates) {
+        if (exists(candidate)) {
+            return candidate;
+        }
     }
     return null;
+}
+
+function getWorkbenchPath(file: WorkbenchFile): string | null {
+    const candidates = getWorkbenchPathCandidates(vscode.env.appRoot, file);
+    const selected = selectWorkbenchPath(candidates, candidate => fs.existsSync(candidate));
+    if (selected) {
+        console.log(`[Wallpaper] Selected Workbench ${file.toUpperCase()}: ${selected}`);
+    } else {
+        console.error(`[Wallpaper] Workbench ${file.toUpperCase()} not found. Checked: ${candidates.join(', ')}`);
+    }
+    return selected;
 }
 
 export function isPatched(): boolean {
@@ -252,9 +294,7 @@ async function patchWorkbenchHtml(port: number) {
     if (!contentMatch) { throw new Error('无法读取 Workbench CSP 内容'); }
 
     const serverOrigin = `http://127.0.0.1:${port}`;
-    let restrictedContent = addSourceToDirective(contentMatch[1], 'frame-src', serverOrigin);
-    restrictedContent = addSourceToDirective(restrictedContent, 'connect-src', serverOrigin);
-    restrictedContent = addSourceToDirective(restrictedContent, 'media-src', serverOrigin);
+    const restrictedContent = patchWorkbenchCspContent(contentMatch[1], port);
     const patchedTag = originalTag.replace(contentRegex, `content="${restrictedContent}"`);
 
     console.log(`[Wallpaper] Allowing local server in Workbench CSP: ${serverOrigin}`);
@@ -359,6 +399,11 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
                     const attemptDetail = 'generation=' + token.generation
                         + ', attempt=' + token.attempt
                         + (detail ? ', ' + detail : '');
+                    const failureFields = {
+                        ...mediaSnapshot(el),
+                        ...(el.error ? { errorCode: el.error.code } : {}),
+                        detail: attemptDetail
+                    };
                     if (event === 'ready') {
                         playbackReady = true;
                         clearAttemptRuntime();
@@ -366,12 +411,9 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
                         return;
                     }
                     if (event === 'retry-exhausted') {
+                        reportPlayback('error', 'retry-exhausted', failureFields);
                         clearAttemptRuntime();
                         clearVideoSource();
-                        reportPlayback('error', 'retry-exhausted', {
-                            ...mediaSnapshot(el),
-                            detail: attemptDetail
-                        });
                         return;
                     }
                     if (event === 'retry-scheduled') {
