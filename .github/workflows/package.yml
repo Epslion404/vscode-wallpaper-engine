@@ -20,11 +20,11 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run VS Code package script
         id: package
-        run: npx vsce package
+        run: npm run vsce-package
 
       - name: Find VSIX file name
         id: find_file

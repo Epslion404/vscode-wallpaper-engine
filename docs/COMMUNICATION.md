@@ -24,7 +24,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 HTML 实际引用的 `electron-browser` 或 `electron-sandbox` `workbench.js`；旧布局才回退到 `workbench.desktop.main.js`。模块 URL 写入 `vscode-wallpaper` cache-bust 参数后请求窗口重载。
 7. 注入脚本创建 `#vscode-wallpaper-container`。壁纸层使用 `z-index: 0`，Workbench 根层使用独立的 `z-index: 1` stacking context；容器被后加载布局移除时只执行有界、幂等恢复。
 8. 视频、Scene 缓存和图片壁纸通过固定的 `/media/current` 加载；Video/Image 在 `/ping` 成功前不挂载媒体源，失败时最多进行三次有界启动尝试。Web 壁纸通过本地服务的 `/api/get-entry` 加载。
-9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频通常只有在 `playing` 后 `currentTime` 确实推进才进入 ready；若 Chromium 因页面隐藏暂停无音轨视频，则上报 `visibility-deferred`，保留媒体源并在页面恢复可见后继续播放。重载后的 Extension Host 通过 `/playback-status` 确认，并忽略早于本次待确认事务的陈旧快照后才报告成功。
+9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频通常只有在 `playing` 后 `currentTime` 确实推进才进入 ready；只有名称为 `AbortError` 且消息命中 Chromium `video-only background media was paused to save power` 的异常才进入 `visibility-deferred`。该状态不消耗通用重试、不清空媒体源，并使用活动 generation/attempt token 隔离旧请求的迟到回调；页面恢复可见后继续播放并重新验证时间轴。重载后的 Extension Host 通过 `/playback-status` 确认，忽略早于本次待确认事务的陈旧快照；仅 `video + loading + visibility-deferred + paused=true` 可作为条件就绪，其他组合继续等待或按终态错误失败。
 
 ## 3. 本地 HTTP 接口
 
@@ -76,7 +76,7 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 ## 6. 刷新、重载与还原
 
 - 正式“设置壁纸”事务会保存待确认状态，并在注入完成后请求 `workbench.action.reloadWindow`。直接修改配置时，同播放类型走热切换；Video、Image、Web 类型变化会自动重载。
-- 重载后的激活流程会验证注入标记、服务健康、壁纸入口和真实媒体 ready；任一项失败都会保留错误状态，便于查看 `Wallpaper Engine` Output 日志。
+- 重载后的激活流程会验证注入标记、服务健康、壁纸入口和媒体播放状态；通常要求真实媒体 ready，合法的 `video/loading/visibility-deferred/paused=true` 可作为条件确认并等待页面恢复可见。任一真正失败都会保留错误状态，便于查看 `Wallpaper Engine` Output 日志。
 - Reload Window 关闭旧 Extension Host 时产生的精确取消错误属于正常事务移交，不触发配置回滚或虚假失败提示。
 - 旧 Extension Host 的服务仍健康时，新宿主作为 follower；旧 owner 退出后 follower 在原端口竞争接管，generation 与 AbortSignal 会使旧探测、监听和关闭回调失效。
 - 每次注入都会更新 Workbench 模块入口的 cache-bust 参数，因此 Reload Window 不需要退出整个 Code 主进程也能执行最新协议代码。
@@ -88,7 +88,7 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 
 1. **服务未启动或端口冲突**：查看 `Wallpaper Engine` Output 中的 `/status` 和监听错误，修改 `serverPort` 后重新设置壁纸。
 2. **CSP 或注入标记缺失**：VS Code 更新后核心文件可能恢复原状，重新执行设置壁纸即可重新补丁。
-3. **启动瞬间可见、随后变黑**：先根据 `/playback-status` 区分“媒体未播放”和“媒体已播放但被遮挡”。`play-rejected` 等旧版或瞬态错误会继续等待；当前终态错误为 `retry-exhausted`、`load-error`、`container-removed`。媒体 ready 但仍不可见时，检查 `surface.background`、容器层级和主题兼容状态。
+3. **启动瞬间可见、随后变黑**：先根据 `/playback-status` 区分“媒体未播放”和“媒体已播放但被遮挡”。`play-rejected` 等旧版或瞬态错误会继续等待；`visibility-deferred` 表示 Chromium 因页面隐藏暂停了无音轨视频，返回窗口后应自动恢复，不应重录 Scene 缓存。当前终态错误为 `retry-exhausted`、`load-error`、`container-removed`。媒体 ready 但仍不可见时，检查 `surface.background`、容器层级和主题兼容状态。
 4. **属性面板无内容**：确认当前壁纸包含可解析的 `project.json`，并检查本地服务是否能访问 `/project.json`。
 
 ## 8. 时序图

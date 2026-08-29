@@ -9,16 +9,19 @@
 3. 克隆仓库并安装依赖：
 
    ```powershell
-   npm install
+   npm ci
    ```
 
 ## 代码结构
 
 - `src/extension.ts`：扩展激活、命令、配置监听、设置/还原事务。
 - `src/core/injector.ts`：Workbench HTML/JavaScript 注入、CSP 来源补丁和沙箱 iframe。
-- `src/core/server.ts`：本地壁纸 HTTP 服务、入口和属性接口。
+- `src/core/server.ts`、`src/core/server-media.ts`：本地壁纸 HTTP 服务、入口、属性和当前媒体 Range 接口。
+- `src/core/media-startup.ts`、`src/core/playback-monitor.ts`：有界媒体启动、播放事件校验和重载后确认。
 - `src/core/scanner.ts`：创意工坊 `project.json` 扫描与诊断。
 - `src/core/config-patcher.ts`：透明化规则、主题兼容和托管值备份。
+- `src/core/scene-recorder.ts`、`src/core/scene-cache.ts`：Scene 录制、转码、缓存提交与校验。
+- `native/scene-capture-helper`：Windows Graphics Capture helper 源码；发布包使用 `bin/` 中的构建产物。
 - `src/panels/setting-panel.ts`、`media/settings.*`：Wallpaper Settings Webview 和本地化文本。
 - `src/test/`：单元测试与集成测试。
 
@@ -66,24 +69,36 @@ git diff --check
 3. 执行：
 
    ```powershell
-   npm run vsce-package
+   npm run output
    ```
 
-   该命令会运行 `vscode:prepublish`，依次执行生产构建、类型检查和 Lint，然后在项目根目录生成 `vscode-wallpaper-engine-<version>.vsix`。
-4. 交付产物可移动到 `release/` 并计算 SHA-256：
+   该命令会运行生产构建、类型检查和 Lint，打包 VSIX，并把最终文件移动到 `artifacts/`。
+4. 计算最终产物 SHA-256：
 
    ```powershell
-   Move-Item .\vscode-wallpaper-engine-<version>.vsix .\release\
-   Get-FileHash -Algorithm SHA256 .\release\vscode-wallpaper-engine-<version>.vsix
+   Get-FileHash -Algorithm SHA256 .\artifacts\vscode-wallpaper-engine-<version>.vsix
+   Copy-Item .\artifacts\vscode-wallpaper-engine-<version>.vsix .\release\
    ```
 
    VSIX 默认被 `.gitignore` 排除，源码提交不应强制加入二进制文件。
-5. 提交并推送前检查：
+5. 提交并推送前确认本地知识库、规划和制品未进入 Git：
 
    ```powershell
    git status --short
+   git ls-files .nexus-map .planning artifacts
+   git check-ignore -v .nexus-map .planning artifacts .\artifacts\vscode-wallpaper-engine-<version>.vsix .\release\vscode-wallpaper-engine-<version>.vsix
+   git diff --check
    git log -1 --oneline
+   ```
+
+   `git ls-files` 对上述目录应无输出；`.nexus-map` 是本地知识库，不得提交或打入 VSIX。
+6. 提交、推送并创建 GitHub Release：
+
+   ```powershell
    git push origin master
+   git tag -a v<version> -m "Release v<version>"
+   git push origin v<version>
+   gh release create v<version> .\artifacts\vscode-wallpaper-engine-<version>.vsix --title "v<version>" --notes-file <release-notes-file>
    ```
 
 如网络环境需要代理，在 Git 命令中显式设置 `http.proxy` 和 `https.proxy`，不要把代理凭据写入仓库配置或文档。
@@ -98,4 +113,4 @@ git diff --check
 
 ## 版本记录
 
-当前版本为 `0.1.2`。用户可见变更统一记录在 [CHANGELOG.md](CHANGELOG.md)；通信协议和本地接口记录在 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)。
+当前版本为 `0.2.1`。用户可见变更统一记录在 [CHANGELOG.md](CHANGELOG.md)；通信协议和本地接口记录在 [docs/COMMUNICATION.md](docs/COMMUNICATION.md)。

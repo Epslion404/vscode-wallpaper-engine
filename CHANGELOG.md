@@ -22,6 +22,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - 播放确认接受本次事务的 `visibility-deferred` 条件状态，同时继续将真实的 `retry-exhausted` 视为终止错误。
 - Workbench 注入协议升级到 `7`，确保已安装旧注入的用户应用新的可见性恢复逻辑。
 
+### Documentation
+
+- README、Release 状态、通信协议和开发发布指南已同步到 0.2.1，并补充 Nexus 本地知识库与 VSIX 的提交排除检查。
+- 扩展仓库元数据指向当前 GitHub 仓库，发布工作流改用锁文件安装和项目内固定版本的 VSCE 命令。
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

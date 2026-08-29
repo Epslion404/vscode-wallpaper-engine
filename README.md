@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/visual-studio-marketplace/v/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/vakesamahere.vscode-wallpaper-engine)](https://marketplace.visualstudio.com/items?itemName=vakesamahere.vscode-wallpaper-engine)
 
-将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.2.0`。
+将 **Wallpaper Engine** 的壁纸带入 VS Code。当前版本：`0.2.1`。
 
 本插件通过在 VS Code 核心文件中注入代码，实现了真正的动态背景支持，并提供了强大的 UI 透明化控制功能，让你在享受动态壁纸的同时，依然保持高效的编码体验。
 
@@ -17,7 +17,7 @@
 - **深度透明化**: 不仅仅是简单的透明度，支持对编辑器、侧边栏、面板、终端等 UI 元素进行**精细化的透明度控制**。
 - **智能配色**: 自动适配当前主题颜色，支持自定义透明基底颜色，确保在任何主题下都能获得完美的视觉效果。
 - **自定义增强**: 支持注入自定义 CSS，微调编辑器外观。
-- **状态验证**: 设置过程包含媒体校验、服务健康检查、入口检查、Workbench 注入、透明化和重载后的真实播放确认；视频时间轴开始推进后才报告成功。
+- **状态验证**: 设置过程包含媒体校验、服务健康检查、入口检查、Workbench 注入、透明化和重载后的播放确认；视频通常在时间轴开始推进后报告成功，Chromium 因页面隐藏暂停无音轨视频时则保留媒体并等待窗口恢复可见。
 - **C/C++ Theme 兼容**: 基础注入始终覆盖现代 UI shell 背景，并可自动识别 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题执行额外兼容处理。
 - **中英双语设置面板**: Wallpaper Settings 支持 `auto`、中文和 English，可运行时切换并持久化。
 - **隔离加载**: Web 壁纸运行在 `sandbox="allow-scripts"` 的 iframe 中，不能访问 Workbench DOM。
@@ -45,7 +45,7 @@
     - 选择 Scene 时输入录制秒数；留空默认 30 秒，有效范围为 1–300 秒。已有缓存可直接使用或重新录制。
 4.  **等待窗口重载与确认**:
     - 插件完成校验和注入后会请求重新加载窗口。
-    - 重载后只有在注入标记、壁纸服务、入口文件和实际媒体播放均验证通过时，才会提示壁纸正在播放。
+    - 重载后会验证注入标记、壁纸服务、入口文件和媒体播放状态；视频通常需要时间轴推进，合法的页面隐藏节能暂停会先保留媒体，返回窗口后继续确认播放。
     - 如果没有自动重载，可执行 `Developer: Reload Window` 后查看 `Wallpaper Engine` Output 日志。
 
 ## ⚙️ 配置详解
@@ -150,10 +150,10 @@
 ### 设置完成但壁纸没有显示？
 
 1. 打开 `View: Toggle Output`，在下拉列表选择 `Wallpaper Engine`。
-2. 确认日志中的服务健康检查、入口检查、Workbench 注入和 `time-progress` 播放确认均成功。`0.2.0` 起，确认只接受本次设置事务开始后的播放快照。
+2. 确认日志中的服务健康检查、入口检查和 Workbench 注入均成功。视频通常以 `time-progress` 确认播放；若出现合法的 `visibility-deferred`，表示媒体因页面隐藏被 Chromium 暂停，返回窗口后应继续播放。`0.2.0` 起，确认只接受本次设置事务开始后的播放快照。
 3. 执行 `Developer: Reload Window`；VS Code 更新后可能覆盖注入，需要重新执行 `Set Wallpaper: 设置壁纸`。
 4. 检查 `vscode-wallpaper-engine.serverPort` 是否被其他进程占用。
-5. `play-rejected` 等旧版或瞬态错误会继续等待后续 `ready`，不会立即误报失败；`retry-exhausted`、`load-error`、`container-removed` 才是当前协议的终态错误。若最终超时，日志会保留最后一次播放错误用于诊断。
+5. `play-rejected` 等旧版或瞬态错误会继续等待后续 `ready`，不会立即误报失败。Chromium 因页面隐藏而暂停无音轨视频时会进入 `visibility-deferred`，媒体源会保留，并在窗口恢复可见后继续播放；`retry-exhausted`、`load-error`、`container-removed` 才是当前协议的终态错误。若最终超时，日志会保留最后一次播放错误用于诊断。
 
 ### 设置面板语言没有更新？
 
@@ -166,15 +166,15 @@
 ## 🛠️ 开发与发布
 
 ```powershell
-npm install
+npm ci
 npm run build:scene-helper # 仅在修改 native helper 后执行，需要 Rust stable
 npm run check-types
 npm run lint
 npm test -- --runInBand
-npm run vsce-package
+npm run output
 ```
 
-`npm run vsce-package` 会先执行生产构建，再在项目根目录生成 `vscode-wallpaper-engine-<version>.vsix`。发布前请确认 `package.json` 与 `package-lock.json` 版本一致，并使用 `git diff --check` 检查空白错误。仓库默认忽略 VSIX 文件；需要交付时可将产物归档到 `release/`，并记录 SHA-256。
+`npm run output` 会先执行生产构建，再将 `vscode-wallpaper-engine-<version>.vsix` 移动到 `artifacts/`。发布前请确认 `package.json` 与 `package-lock.json` 版本一致，使用 `git diff --check` 检查空白错误，并确认 `.nexus-map`、`.planning`、`artifacts` 与 VSIX 都未进入 Git；需要本地交付时再把最终包复制到 `release/`，并记录 SHA-256。
 
 ## 📁 项目结构
 
