@@ -16,6 +16,11 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Fixed
 
 - Scene 播放状态持久化为实际缓存视频描述符，确保重载恢复、自动应用和设置回滚不会误用原始 Scene 资源。
+- 视频和 Scene 缓存改用受限的当前媒体 HTTP 入口，支持 `GET`、`HEAD`、单字节 Range、`206` 与 `416`，避免 `vscode-file` 在 Electron 媒体管线中的不稳定行为。
+- Workbench 注入新增有界媒体事件诊断、播放 Promise 错误、启动 watchdog 和真实时间轴推进确认；设置成功不再只依赖服务与入口存在。
+- 壁纸容器改用非负 stacking context，并在 Workbench 布局重建时执行有界、幂等恢复，避免完整 UI 加载后落到窗口黑色背景之后。
+- 新增 `surface.background` 现代 UI 基础表面透明化规则，并保留用户原颜色的托管备份与恢复行为。
+- Reload Window 正常终止旧 Extension Host 时产生的精确取消错误不再触发回滚或虚假失败通知。
 
 ## [0.1.2] - 2026-08-28
 

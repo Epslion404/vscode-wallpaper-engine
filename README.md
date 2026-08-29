@@ -17,7 +17,7 @@
 - **深度透明化**: 不仅仅是简单的透明度，支持对编辑器、侧边栏、面板、终端等 UI 元素进行**精细化的透明度控制**。
 - **智能配色**: 自动适配当前主题颜色，支持自定义透明基底颜色，确保在任何主题下都能获得完美的视觉效果。
 - **自定义增强**: 支持注入自定义 CSS，微调编辑器外观。
-- **状态验证**: 设置过程包含媒体校验、服务健康检查、入口检查、Workbench 注入、透明化和重载后确认。
+- **状态验证**: 设置过程包含媒体校验、服务健康检查、入口检查、Workbench 注入、透明化和重载后的真实播放确认；视频时间轴开始推进后才报告成功。
 - **C/C++ Theme 兼容**: 基础注入始终覆盖现代 UI shell 背景，并可自动识别 `ms-vscode.cpptools-themes` 的 Visual Studio C/C++ 主题执行额外兼容处理。
 - **中英双语设置面板**: Wallpaper Settings 支持 `auto`、中文和 English，可运行时切换并持久化。
 - **隔离加载**: Web 壁纸运行在 `sandbox="allow-scripts"` 的 iframe 中，不能访问 Workbench DOM。
@@ -45,7 +45,7 @@
     - 选择 Scene 时输入录制秒数；留空默认 30 秒，有效范围为 1–300 秒。已有缓存可直接使用或重新录制。
 4.  **等待窗口重载与确认**:
     - 插件完成校验和注入后会请求重新加载窗口。
-    - 重载后只有在注入标记、壁纸服务和入口文件均验证通过时，才会提示壁纸已生效。
+    - 重载后只有在注入标记、壁纸服务、入口文件和实际媒体播放均验证通过时，才会提示壁纸正在播放。
     - 如果没有自动重载，可执行 `Developer: Reload Window` 后查看 `Wallpaper Engine` Output 日志。
 
 ## ⚙️ 配置详解
@@ -69,6 +69,7 @@
 - **Enable Transparency**: 全局开启/关闭透明化效果。
 - **Transparency Rules**: 精细控制各个 UI 区域的透明度 (0 = 完全透明, 1 = 不透明)。
   - `editor.background`: 代码编辑区
+  - `surface.background`: VS Code 现代布局基础表面
   - `sideBar.background`: 侧边栏
   - `panel.background`: 底部面板 (终端/输出)
   - `terminal.background`: 终端背景
@@ -131,13 +132,10 @@
 
 ### 视频壁纸无法播放 / 黑屏？
 
-VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不支持 WebM 等常见视频格式。
-
-**解决方法**:
-
-1.  检查你的 VS Code 版本对应的 Electron 版本 (Help -> About -> Electron)。
-2.  下载对应 Electron 版本的完整版 `ffmpeg.dll`。
-3.  替换 VS Code 安装目录下的 `ffmpeg.dll` 文件。
+1. 打开 `Wallpaper Engine` Output，检查 `loadedmetadata`、`canplay`、`playing`、`time-progress` 或明确的媒体错误。
+2. 视频和 Scene 缓存通过受限的 `/media/current` 加载；该接口应支持 `HEAD`、字节范围请求和 `206 Partial Content`。若日志显示网络错误，先检查本地端口占用和安全软件拦截。
+3. `MEDIA_ERR_DECODE` 或 `MEDIA_ERR_SRC_NOT_SUPPORTED` 才表示需要进一步检查 Electron 的编解码能力；不要在没有该证据时替换 VS Code 的 `ffmpeg.dll`。
+4. 如果视频时间轴正常推进但仍不可见，检查主题透明化规则，尤其是 `surface.background`，并重新执行一次设置壁纸以升级 Workbench 注入。
 
 ### Scene 无法录制？
 
@@ -150,10 +148,10 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 ### 设置完成但壁纸没有显示？
 
 1. 打开 `View: Toggle Output`，在下拉列表选择 `Wallpaper Engine`。
-2. 确认日志中的服务健康检查、入口检查和 Workbench 注入均成功。
+2. 确认日志中的服务健康检查、入口检查、Workbench 注入和 `time-progress` 播放确认均成功。
 3. 执行 `Developer: Reload Window`；VS Code 更新后可能覆盖注入，需要重新执行 `Set Wallpaper: 设置壁纸`。
 4. 检查 `vscode-wallpaper-engine.serverPort` 是否被其他进程占用。
-5. 若日志显示“设置成功”但重载后仍无壁纸，先执行 `Restore Wallpaper Changes: 还原壁纸修改`，确认还原验证通过后，再重新执行设置壁纸。
+5. 若出现 `watchdog-timeout`、`play-rejected`、`media-error` 或播放确认超时，按日志中的具体阶段排查；失败的待确认记录会保留用于诊断，但不会循环重载窗口。
 
 ### 设置面板语言没有更新？
 
@@ -161,7 +159,7 @@ VS Code 内置的 Electron 环境默认携带的 `ffmpeg.dll` 是精简版，不
 
 ### 壁纸只在启动瞬间出现，随后变黑？
 
-这通常是主题扩展或旧版注入在 Workbench 完成加载后重新写入了不透明背景。当前版本会通过运行时守护持续覆盖 modern UI shell，并将注入协议升级到 `4`；升级后请重新执行一次“设置壁纸”或重载窗口。若已安装 `ms-vscode.cpptools-themes`，请保持 `themeCompatibility=auto`，必要时改为 `on`。确认冲突后不需要修改壁纸文件。
+当前修复同时处理三条链路：视频改用支持 Range 的本地 HTTP 媒体入口；壁纸容器使用非负层级并在被 Workbench 重建移除时恢复；现代布局基础表面 `surface.background` 纳入透明化。Workbench 注入协议升级到 `5`，升级后需要重新执行一次“设置壁纸”。若日志显示视频已 `time-progress` 但仍不可见，再检查 C/C++ Theme 等主题兼容设置。
 
 ## 🛠️ 开发与发布
 
@@ -180,7 +178,8 @@ npm run vsce-package
 
 - `src/extension.ts`: 扩展生命周期、命令注册、设置壁纸和还原流程。
 - `src/core/injector.ts`: Workbench HTML/JS 注入、CSP 本地来源补丁和沙箱 iframe 引导。
-- `src/core/server.ts`: 仅监听 `127.0.0.1` 的本地壁纸 HTTP 服务及健康检查接口。
+- `src/core/server.ts`、`src/core/server-media.ts`: 仅监听 `127.0.0.1` 的本地壁纸服务、当前媒体 Range 传输及健康检查接口。
+- `src/core/playback-monitor.ts`: Workbench 媒体事件与服务端播放状态的严格边界校验。
 - `src/core/config-patcher.ts`: 透明化规则、主题兼容和托管配置备份。
 - `src/core/scene-recorder.ts`、`src/core/scene-cache.ts`: Scene 录制编排、缓存清单与校验。
 - `native/scene-capture-helper`: Windows Graphics Capture 原生 helper 源码；发布包使用 `bin/` 中的已构建程序。
