@@ -160,13 +160,26 @@ export type WorkbenchFile = 'html' | 'js';
 
 /** 分别生成 HTML 与 JavaScript 候选，兼容 VS Code 不同 Electron 布局。 */
 export function getWorkbenchPathCandidates(root: string, file: WorkbenchFile): string[] {
-    const basePaths = [
-        path.join(root, 'out', 'vs', 'code', 'electron-browser', 'workbench'),
-        path.join(root, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
-        path.join(root, 'out', 'vs', 'workbench')
+    const browserWorkbench = path.join(root, 'out', 'vs', 'code', 'electron-browser', 'workbench');
+    const sandboxWorkbench = path.join(root, 'out', 'vs', 'code', 'electron-sandbox', 'workbench');
+    if (file === 'html') {
+        return [
+            path.join(browserWorkbench, 'workbench.html'),
+            path.join(sandboxWorkbench, 'workbench.html'),
+        ];
+    }
+    return [
+        // VS Code 1.135 的 HTML 直接加载同目录 ESM 入口；必须优先于仍存在但未引用的旧 bundle。
+        path.join(browserWorkbench, 'workbench.js'),
+        path.join(sandboxWorkbench, 'workbench.js'),
+        path.join(browserWorkbench, 'workbench.desktop.main.js'),
+        path.join(sandboxWorkbench, 'workbench.desktop.main.js'),
+        path.join(root, 'out', 'vs', 'workbench', 'workbench.desktop.main.js'),
     ];
-    const filename = file === 'html' ? 'workbench.html' : 'workbench.desktop.main.js';
-    return basePaths.map(basePath => path.join(basePath, filename));
+}
+
+export function stripWorkbenchInjection(content: string): string {
+    return content.replace(JS_INJECTION_REGEX, '');
 }
 
 export function selectWorkbenchPath(
@@ -210,7 +223,8 @@ export function isPatched(): boolean {
  */
 export async function restoreWorkbench() {
     const htmlPath = getWorkbenchPath('html');
-    const jsPath = getWorkbenchPath('js');
+    const jsPaths = getWorkbenchPathCandidates(vscode.env.appRoot, 'js')
+        .filter(candidate => fs.existsSync(candidate));
 
     try {
         // 1. 还原 HTML
@@ -246,12 +260,12 @@ export async function restoreWorkbench() {
         }
 
         // 2. 还原 JS
-        if (jsPath) {
-            let js = fs.readFileSync(jsPath, 'utf-8');
-            if (js.match(JS_INJECTION_REGEX)) {
+        for (const jsPath of jsPaths) {
+            const js = fs.readFileSync(jsPath, 'utf-8');
+            const cleanedJs = stripWorkbenchInjection(js);
+            if (cleanedJs !== js) {
                 console.log("正在清理 JS 注入...");
-                js = js.replace(JS_INJECTION_REGEX, '');
-                await saveFilePrivileged(jsPath, js);
+                await saveFilePrivileged(jsPath, cleanedJs);
             }
         }
         
@@ -1013,8 +1027,20 @@ ${JS_INJECTION_VERSION_MARKER}
 })();
 /* [VSCode-Wallpaper-Injection-End] */`;
 
-    let raw = fs.readFileSync(jsPath, 'utf-8');
-    raw = raw.replace(JS_INJECTION_REGEX, '');
+    let raw = '';
+    for (const candidate of getWorkbenchPathCandidates(vscode.env.appRoot, 'js')) {
+        if (!fs.existsSync(candidate)) {
+            continue;
+        }
+        const candidateContent = fs.readFileSync(candidate, 'utf-8');
+        const cleanedContent = stripWorkbenchInjection(candidateContent);
+        if (candidate === jsPath) {
+            raw = cleanedContent;
+        } else if (cleanedContent !== candidateContent) {
+            console.log(`[Wallpaper] Removing stale injection from unused Workbench JS: ${candidate}`);
+            await saveFilePrivileged(candidate, cleanedContent);
+        }
+    }
     await saveFilePrivileged(jsPath, raw + jsInjection);
     ensureInjectionWritten(
         fs.readFileSync(jsPath, 'utf-8'),

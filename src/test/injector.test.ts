@@ -11,6 +11,7 @@ import {
     patchWorkbenchCspContent,
     runInjectionStep,
     selectWorkbenchPath,
+    stripWorkbenchInjection,
     stripManagedLocalOriginsFromCspContent,
     WorkbenchInjectionError,
 } from '../core/injector';
@@ -85,16 +86,32 @@ suite('Injector security boundary', () => {
         const jsCandidates = getWorkbenchPathCandidates(root, 'js');
 
         assert.match(htmlCandidates[0], /electron-browser[\\/]workbench[\\/]workbench\.html$/);
+        assert.match(jsCandidates[0], /electron-browser[\\/]workbench[\\/]workbench\.js$/);
         assert.match(jsCandidates[jsCandidates.length - 1], /out[\\/]vs[\\/]workbench[\\/]workbench\.desktop\.main\.js$/);
         assert.strictEqual(
             selectWorkbenchPath(htmlCandidates, candidate => candidate === htmlCandidates[0]),
             htmlCandidates[0],
         );
         assert.strictEqual(
-            selectWorkbenchPath(jsCandidates, candidate => candidate === jsCandidates[jsCandidates.length - 1]),
-            jsCandidates[jsCandidates.length - 1],
+            selectWorkbenchPath(
+                jsCandidates,
+                candidate => candidate === jsCandidates[0] || candidate === jsCandidates[jsCandidates.length - 1],
+            ),
+            jsCandidates[0],
         );
         assert.strictEqual(selectWorkbenchPath(jsCandidates, () => false), null);
+    });
+
+    test('Workbench cleanup removes injection blocks from every candidate content', () => {
+        const injected = [
+            'before',
+            '/* [VSCode-Wallpaper-Injection-Start] */',
+            'window.__vscodeWallpaperRuntimeV6 = true;',
+            '/* [VSCode-Wallpaper-Injection-End] */',
+            'after',
+        ].join('\n');
+
+        assert.strictEqual(stripWorkbenchInjection(injected).trim(), 'before\nafter');
     });
 
     test('Workbench root layers remain transparent so the wallpaper can stay behind the UI', () => {
