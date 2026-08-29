@@ -8,10 +8,12 @@ import {
     getWorkbenchPathCandidates,
     getWorkbenchTransparencyCss,
     hasCurrentInjection,
+    patchWorkbenchScriptVersion,
     patchWorkbenchCspContent,
     runInjectionStep,
     selectWorkbenchPath,
     stripWorkbenchInjection,
+    stripWorkbenchScriptVersion,
     stripManagedLocalOriginsFromCspContent,
     WorkbenchInjectionError,
 } from '../core/injector';
@@ -112,6 +114,14 @@ suite('Injector security boundary', () => {
         ].join('\n');
 
         assert.strictEqual(stripWorkbenchInjection(injected).trim(), 'before\nafter');
+    });
+
+    test('Workbench script versioning invalidates module cache and restores unrelated query parameters', () => {
+        const html = '<script src="./workbench.js?existing=1" type="module"></script>';
+        const patched = patchWorkbenchScriptVersion(html, 'operation-123');
+
+        assert.match(patched, /workbench\.js\?existing=1&amp;vscode-wallpaper=operation-123/);
+        assert.strictEqual(stripWorkbenchScriptVersion(patched), html);
     });
 
     test('Workbench root layers remain transparent so the wallpaper can stay behind the UI', () => {

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { saveFilePrivileged } from './admin-saver';
 import { WallpaperType } from './types';
 import { getThemeCompatibilityCss } from './theme-compatibility';
@@ -23,6 +24,8 @@ const ATTR_RENAMED = 'http-equiv="Content-Security-Policy--replaced-by-wallpaper
 
 const LOCAL_SERVER_ORIGIN_PATTERN = /http:\/\/127\.0\.0\.1:\d+/g;
 const MANAGED_CSP_DIRECTIVES = ['frame-src', 'connect-src', 'media-src', 'img-src'] as const;
+const WORKBENCH_SCRIPT_VERSION_PARAM = 'vscode-wallpaper';
+const WORKBENCH_SCRIPT_SRC_PATTERN = /(\bsrc\s*=\s*["'])(\.\/workbench\.js(?:\?[^"']*)?)(["'])/i;
 
 export type InjectionStage = 'html' | 'javascript' | 'reload';
 
@@ -182,6 +185,34 @@ export function stripWorkbenchInjection(content: string): string {
     return content.replace(JS_INJECTION_REGEX, '');
 }
 
+function updateWorkbenchScriptVersion(html: string, version: string | null): string {
+    return html.replace(WORKBENCH_SCRIPT_SRC_PATTERN, (_match, prefix: string, source: string, suffix: string) => {
+        const [scriptPath, rawQuery = ''] = source.replace(/&amp;/g, '&').split('?', 2);
+        const query = new URLSearchParams(rawQuery);
+        if (version === null) {
+            query.delete(WORKBENCH_SCRIPT_VERSION_PARAM);
+        } else {
+            query.set(WORKBENCH_SCRIPT_VERSION_PARAM, version);
+        }
+        const serializedQuery = query.toString().replace(/&/g, '&amp;');
+        return `${prefix}${scriptPath}${serializedQuery ? `?${serializedQuery}` : ''}${suffix}`;
+    });
+}
+
+/** 每次注入改变模块 URL，避免 Reload Window 复用旧的 Electron 编译缓存。 */
+export function patchWorkbenchScriptVersion(html: string, version: string): string {
+    const patched = updateWorkbenchScriptVersion(html, version);
+    if (patched === html) {
+        throw new Error('Workbench HTML 缺少 workbench.js 模块入口');
+    }
+    return patched;
+}
+
+/** 还原扩展管理的版本参数，同时保留入口原有的其他查询参数。 */
+export function stripWorkbenchScriptVersion(html: string): string {
+    return updateWorkbenchScriptVersion(html, null);
+}
+
 export function selectWorkbenchPath(
     candidates: readonly string[],
     exists: (candidate: string) => boolean,
@@ -248,7 +279,7 @@ export async function restoreWorkbench() {
             }
 
             // C. 移除新版 CSP 中仅为本地壁纸服务添加的来源。
-            const cleanedHtml = stripLocalServerOriginsFromCsp(html);
+            const cleanedHtml = stripWorkbenchScriptVersion(stripLocalServerOriginsFromCsp(html));
             if (cleanedHtml !== html) {
                 html = cleanedHtml;
                 changed = true;
@@ -288,7 +319,7 @@ export function hasCurrentInjection(content: string): boolean {
  * 仅允许 Workbench 连接并嵌入当前本地壁纸服务。
  * 保留 VS Code 原有 CSP 的其他限制，包括 Trusted Types。
  */
-async function patchWorkbenchHtml(port: number) {
+async function patchWorkbenchHtml(port: number, scriptVersion: string) {
     const targetHtml = getWorkbenchPath('html');
     if (!targetHtml) { throw new Error('未找到 Workbench HTML 文件'); }
 
@@ -312,9 +343,11 @@ async function patchWorkbenchHtml(port: number) {
     const patchedTag = originalTag.replace(contentRegex, `content="${restrictedContent}"`);
 
     console.log(`[Wallpaper] Allowing local server in Workbench CSP: ${serverOrigin}`);
-    html = html.replace(originalTag, patchedTag);
+    html = patchWorkbenchScriptVersion(html.replace(originalTag, patchedTag), scriptVersion);
     await saveFilePrivileged(targetHtml, html);
-    ensureInjectionWritten(fs.readFileSync(targetHtml, 'utf-8'), patchedTag, targetHtml);
+    const writtenHtml = fs.readFileSync(targetHtml, 'utf-8');
+    ensureInjectionWritten(writtenHtml, patchedTag, targetHtml);
+    ensureInjectionWritten(writtenHtml, `${WORKBENCH_SCRIPT_VERSION_PARAM}=${scriptVersion}`, targetHtml);
 }
 async function injectJs(type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, showDebugSidebar: boolean) {
     const jsPath = getWorkbenchPath('js');
@@ -1050,8 +1083,9 @@ ${JS_INJECTION_VERSION_MARKER}
 }
 
 export async function performInjection(_mediaPath: string, type: WallpaperType, opacity: number, port: number, resizeDelay: number, startupCheckInterval: number, autoRestart = true, showDebugSidebar = false) {
+    const scriptVersion = randomUUID();
     await executeInjection({
-        patchHtml: () => patchWorkbenchHtml(port),
+        patchHtml: () => patchWorkbenchHtml(port, scriptVersion),
         injectJavaScript: () => (
             injectJs(type, opacity, port, resizeDelay, startupCheckInterval, showDebugSidebar)
         ),
