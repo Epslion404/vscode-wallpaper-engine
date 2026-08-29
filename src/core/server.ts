@@ -39,6 +39,11 @@ const PLAYBACK_READY_TIMEOUT_MS = 10000;
 const PLAYBACK_STATUS_POLL_INTERVAL_MS = 100;
 const PLAYBACK_STATUS_RESPONSE_LIMIT = 4 * 1024;
 const PLAYBACK_EVENT_BODY_LIMIT = 4 * 1024;
+const TERMINAL_PLAYBACK_ERROR_EVENTS = new Set([
+    'retry-exhausted',
+    'load-error',
+    'container-removed'
+]);
 const WALLPAPER_SERVICE_ID = 'vscode-wallpaper-engine';
 const WALLPAPER_SERVICE_PROTOCOL_VERSION = 1;
 const SERVER_STATUS_RESPONSE_LIMIT = 8 * 1024;
@@ -1511,13 +1516,19 @@ ${baseTag}
     /** 等待 Workbench 回报真实播放就绪，而不是只确认媒体文件存在。 */
     public async verifyPlaybackReady(
         expectedMediaType: PlaybackMediaType,
-        timeoutMs = PLAYBACK_READY_TIMEOUT_MS
+        timeoutMs = PLAYBACK_READY_TIMEOUT_MS,
+        minimumUpdatedAt = 0
     ): Promise<void> {
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
             throw new Error('播放就绪超时时间必须大于 0');
         }
+        if (!Number.isSafeInteger(minimumUpdatedAt) || minimumUpdatedAt < 0) {
+            throw new Error('播放状态最小时间戳必须是非负安全整数');
+        }
         const deadline = Date.now() + timeoutMs;
         let lastRequestError: Error | undefined;
+        let lastPlaybackError: string | undefined;
+        let lastLoggedPlaybackError: string | undefined;
 
         while (Date.now() < deadline) {
             const remaining = Math.max(deadline - Date.now(), 1);
@@ -1548,15 +1559,23 @@ ${baseTag}
                     throw new Error('播放状态响应字段无效');
                 }
                 lastRequestError = undefined;
-                if (status.state !== 'idle' && status.mediaType === expectedMediaType) {
+                if (status.state !== 'idle'
+                    && status.mediaType === expectedMediaType
+                    && status.updatedAt >= minimumUpdatedAt) {
                     if (status.state === 'ready') {
                         console.log(`[Playback] ${expectedMediaType} 已确认播放就绪`);
                         return;
                     }
                     if (status.state === 'error') {
-                        throw new Error(
-                            `媒体播放失败（${status.event}${status.errorCode === undefined ? '' : `，错误码 ${status.errorCode}`}）`
-                        );
+                        const detail = status.detail === undefined ? '' : `，${status.detail}`;
+                        lastPlaybackError = `${status.event}${status.errorCode === undefined ? '' : `，错误码 ${status.errorCode}`}${detail}`;
+                        if (TERMINAL_PLAYBACK_ERROR_EVENTS.has(status.event)) {
+                            throw new Error(`媒体播放失败（${lastPlaybackError}）`);
+                        }
+                        if (lastPlaybackError !== lastLoggedPlaybackError) {
+                            console.warn(`[Playback] 忽略可恢复播放错误，继续等待 ready：${lastPlaybackError}`);
+                            lastLoggedPlaybackError = lastPlaybackError;
+                        }
                     }
                 }
             } catch (error) {
@@ -1573,8 +1592,9 @@ ${baseTag}
             }
         }
 
-        const suffix = lastRequestError ? `；最后错误：${lastRequestError.message}` : '';
-        throw new Error(`等待 ${expectedMediaType} 播放就绪超时（${timeoutMs} 毫秒）${suffix}`);
+        const requestSuffix = lastRequestError ? `；最后请求错误：${lastRequestError.message}` : '';
+        const playbackSuffix = lastPlaybackError ? `；最后播放错误：${lastPlaybackError}` : '';
+        throw new Error(`等待 ${expectedMediaType} 播放就绪超时（${timeoutMs} 毫秒）${playbackSuffix}${requestSuffix}`);
     }
 
     private async handlePlaybackEvent(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {

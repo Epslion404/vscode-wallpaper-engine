@@ -89,6 +89,39 @@ function close(server: http.Server): Promise<void> {
     });
 }
 
+function createExternalPlaybackOwner(
+    rootPath: string,
+    playbackStatus: (requestNumber: number) => unknown
+) {
+    let playbackRequestCount = 0;
+    const owner = http.createServer((request, response) => {
+        if (request.url === '/status') {
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({
+                service: 'vscode-wallpaper-engine',
+                protocolVersion: 1,
+                instanceId: 'external-playback-owner',
+                running: true,
+                rootPath,
+                entryFile: 'index.html'
+            }));
+            return;
+        }
+        if (request.url === '/playback-status') {
+            playbackRequestCount += 1;
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify(playbackStatus(playbackRequestCount)));
+            return;
+        }
+        response.statusCode = 404;
+        response.end();
+    });
+    return {
+        owner,
+        getPlaybackRequestCount: () => playbackRequestCount
+    };
+}
+
 async function waitForCondition(predicate: () => boolean, timeoutMs = 1500): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
@@ -596,7 +629,7 @@ suite('WallpaperServer lifecycle and preflight', () => {
         assert.strictEqual((await fetch(`${base}/playback-status`, { method: 'POST' })).status, 405);
     });
 
-    test('verifyPlaybackReady resolves ready, rejects errors and times out explicitly', async () => {
+    test('verifyPlaybackReady resolves ready, rejects terminal errors and times out explicitly', async () => {
         server = new WallpaperServer(createContext());
         await server.start(root, 0, 'index.html', root, true);
         const endpoint = `http://127.0.0.1:${server.getCurrentInfo().port}/playback-event`;
@@ -612,13 +645,130 @@ suite('WallpaperServer lifecycle and preflight', () => {
         const failed = server.verifyPlaybackReady('video', 1000);
         await fetch(endpoint, {
             method: 'POST',
-            body: JSON.stringify({ state: 'error', mediaType: 'video', event: 'decode-error', errorCode: 3 })
+            body: JSON.stringify({ state: 'error', mediaType: 'video', event: 'retry-exhausted', errorCode: 3 })
         });
-        await assert.rejects(failed, /媒体播放失败.*decode-error.*错误码 3/);
+        await assert.rejects(failed, /媒体播放失败.*retry-exhausted.*错误码 3/);
 
         await server.start(root, server.getCurrentInfo().port, 'index.html', root, true);
         await assert.rejects(server.verifyPlaybackReady('image', 20), /等待 image 播放就绪超时/);
     });
+
+    test('verifyPlaybackReady ignores stale errors and waits through transient errors for ready', async () => {
+        const confirmationCreatedAt = Date.now();
+        const externalOwner = createExternalPlaybackOwner(root, requestNumber => {
+            if (requestNumber === 1) {
+                return {
+                    state: 'error',
+                    mediaType: 'video',
+                    event: 'retry-exhausted',
+                    updatedAt: confirmationCreatedAt - 1
+                };
+            }
+            if (requestNumber === 2) {
+                return {
+                    state: 'error',
+                    mediaType: 'video',
+                    event: 'play-rejected',
+                    updatedAt: confirmationCreatedAt + 1
+                };
+            }
+            return {
+                state: 'ready',
+                mediaType: 'video',
+                event: 'time-progress',
+                updatedAt: confirmationCreatedAt + 2
+            };
+        });
+        const port = await listen(externalOwner.owner);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await server.verifyPlaybackReady('video', 1000, confirmationCreatedAt);
+            assert.strictEqual(externalOwner.getPlaybackRequestCount(), 3);
+        } finally {
+            await server.stop();
+            await close(externalOwner.owner);
+        }
+    });
+
+    test('verifyPlaybackReady does not accept ready snapshots older than the confirmation', async () => {
+        const confirmationCreatedAt = Date.now();
+        const externalOwner = createExternalPlaybackOwner(root, () => ({
+            state: 'ready',
+            mediaType: 'video',
+            event: 'time-progress',
+            updatedAt: confirmationCreatedAt - 1
+        }));
+        const port = await listen(externalOwner.owner);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await assert.rejects(
+                server.verifyPlaybackReady('video', 30, confirmationCreatedAt),
+                /等待 video 播放就绪超时/
+            );
+            assert.ok(externalOwner.getPlaybackRequestCount() >= 1);
+        } finally {
+            await server.stop();
+            await close(externalOwner.owner);
+        }
+    });
+
+    test('verifyPlaybackReady preserves the last transient playback error on timeout', async () => {
+        const confirmationCreatedAt = Date.now();
+        const externalOwner = createExternalPlaybackOwner(root, () => ({
+            state: 'error',
+            mediaType: 'video',
+            event: 'play-rejected',
+            detail: 'AbortError',
+            updatedAt: confirmationCreatedAt + 1
+        }));
+        const port = await listen(externalOwner.owner);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await assert.rejects(
+                server.verifyPlaybackReady('video', 30, confirmationCreatedAt),
+                /等待 video 播放就绪超时.*最后播放错误：play-rejected.*AbortError/
+            );
+        } finally {
+            await server.stop();
+            await close(externalOwner.owner);
+        }
+    });
+
+    for (const terminalEvent of ['retry-exhausted', 'load-error', 'container-removed']) {
+        test(`verifyPlaybackReady rejects terminal ${terminalEvent} without waiting for timeout`, async () => {
+            const confirmationCreatedAt = Date.now();
+            const externalOwner = createExternalPlaybackOwner(root, () => ({
+                state: 'error',
+                mediaType: terminalEvent === 'load-error' ? 'web' : 'video',
+                event: terminalEvent,
+                updatedAt: confirmationCreatedAt
+            }));
+            const port = await listen(externalOwner.owner);
+            server = new WallpaperServer(createContext());
+
+            try {
+                await server.start(root, port, 'index.html', root, true);
+                await assert.rejects(
+                    server.verifyPlaybackReady(
+                        terminalEvent === 'load-error' ? 'web' : 'video',
+                        1000,
+                        confirmationCreatedAt
+                    ),
+                    new RegExp(`媒体播放失败.*${terminalEvent}`)
+                );
+                assert.strictEqual(externalOwner.getPlaybackRequestCount(), 1);
+            } finally {
+                await server.stop();
+                await close(externalOwner.owner);
+            }
+        });
+    }
 
     test('hot swap resets a previously ready playback snapshot', async () => {
         fs.writeFileSync(path.join(root, 'other.html'), '<!doctype html><html><body>other</body></html>');

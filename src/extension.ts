@@ -294,7 +294,11 @@ export async function activate(context: vscode.ExtensionContext) {
                         entryFile: confirmation.fileName
                     }),
                     verifyEntry: () => activeServer.verifyEntry(),
-                    verifyPlaybackReady: playbackType => activeServer.verifyPlaybackReady(playbackType),
+                    verifyPlaybackReady: (playbackType, minimumUpdatedAt) => activeServer.verifyPlaybackReady(
+                        playbackType,
+                        undefined,
+                        minimumUpdatedAt
+                    ),
                     clearPendingConfirmation: () => context.globalState.update(PENDING_SETUP_CONFIRMATION_KEY, undefined),
                     report: stage => {
                         const message = STAGE_MESSAGES[stage];

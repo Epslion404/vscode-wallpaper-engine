@@ -358,7 +358,9 @@ suite('Wallpaper Setup Test Suite', () => {
         await confirmPendingSetupPlayback(confirmation, {
             verifyHealth: async value => { calls.push(`health:${value.fileName}`); },
             verifyEntry: async () => { calls.push('entry'); },
-            verifyPlaybackReady: async type => { calls.push(`ready:${type}`); },
+            verifyPlaybackReady: async (type, minimumUpdatedAt) => {
+                calls.push(`ready:${type}:${minimumUpdatedAt}`);
+            },
             clearPendingConfirmation: async () => { calls.push('pending-cleared'); },
             report: stage => { calls.push(`stage:${stage}`); }
         });
@@ -369,7 +371,7 @@ suite('Wallpaper Setup Test Suite', () => {
             `stage:${WallpaperSetupStage.VerifyEntry}`,
             'entry',
             `stage:${WallpaperSetupStage.VerifyPlayback}`,
-            'ready:video',
+            'ready:video:1000',
             `stage:${WallpaperSetupStage.FinalizePlayback}`,
             'pending-cleared'
         ]);

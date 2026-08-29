@@ -76,7 +76,7 @@ export interface WallpaperSetupDependencies {
 export interface PendingSetupVerificationDependencies {
     verifyHealth(confirmation: PendingSetupConfirmation): PromiseLike<void>;
     verifyEntry(): PromiseLike<void>;
-    verifyPlaybackReady(playbackType: PlayableWallpaperType): PromiseLike<void>;
+    verifyPlaybackReady(playbackType: PlayableWallpaperType, minimumUpdatedAt: number): PromiseLike<void>;
     clearPendingConfirmation(): PromiseLike<void>;
     report(stage: WallpaperSetupStage): void;
 }
@@ -167,7 +167,7 @@ export async function confirmPendingSetupPlayback(
         await runStage(WallpaperSetupStage.VerifyEntry, () => dependencies.verifyEntry());
         await runStage(
             WallpaperSetupStage.VerifyPlayback,
-            () => dependencies.verifyPlaybackReady(confirmation.playbackType)
+            () => dependencies.verifyPlaybackReady(confirmation.playbackType, confirmation.createdAt)
         );
         // pending 是跨 Extension Host 的事务凭据，只能在真实播放确认成功后清除。
         await runStage(
