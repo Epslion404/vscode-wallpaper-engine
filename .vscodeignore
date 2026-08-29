@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 .tmp-cdp-user-*/**
+.tmp-playback-e2e-*/**
 temp/**
 .github/**
 .planning/**

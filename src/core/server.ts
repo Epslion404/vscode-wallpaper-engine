@@ -3,6 +3,7 @@ import * as https from 'https';
 import * as dns from 'dns';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 import { WebSocket, WebSocketServer } from 'ws';
 import { WALLPAPER_SERVER_PORT } from '../config/constants';
@@ -24,6 +25,11 @@ import {
     PlaybackMonitor
 } from './playback-monitor';
 import { serveCurrentMedia } from './server-media';
+import {
+    scheduleTakeoverTask,
+    ServerTakeoverEvent,
+    ServerTakeoverMonitor
+} from './server-takeover';
 
 export { validateWallpaperMedia, waitForServerListening, WallpaperServerStartupTimeoutError } from './server-preflight';
 
@@ -33,6 +39,10 @@ const PLAYBACK_READY_TIMEOUT_MS = 10000;
 const PLAYBACK_STATUS_POLL_INTERVAL_MS = 100;
 const PLAYBACK_STATUS_RESPONSE_LIMIT = 4 * 1024;
 const PLAYBACK_EVENT_BODY_LIMIT = 4 * 1024;
+const WALLPAPER_SERVICE_ID = 'vscode-wallpaper-engine';
+const WALLPAPER_SERVICE_PROTOCOL_VERSION = 1;
+const SERVER_STATUS_RESPONSE_LIMIT = 8 * 1024;
+const SERVER_TAKEOVER_POLL_INTERVAL_MS = 500;
 
 const PERSISTED_WALLPAPER_STATE_KEYS = [
     'currentWallpaperPath',
@@ -51,12 +61,52 @@ export class PersistedWallpaperStateError extends Error {
     }
 }
 
+class WallpaperServerOperationCancelledError extends Error {
+    public constructor() {
+        super('壁纸服务操作已被新的生命周期请求取代');
+        this.name = 'WallpaperServerOperationCancelledError';
+    }
+}
+
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
 type ProjectProperties = Record<string, JsonObject>;
 
 type BoundedBodyResult = { kind: 'ok'; body: string } | { kind: 'too-large' };
+
+type WallpaperServiceStatus = {
+    kind: 'wallpaper';
+    running: true;
+    rootPath: string;
+    entryFile: string | null;
+    instanceId: string;
+};
+
+type ServerStatusProbe = WallpaperServiceStatus | { kind: 'absent' } | { kind: 'occupied' };
+type ServerOwnership = 'none' | 'external' | 'local';
+type RemoteShutdownResult = 'accepted' | 'owner-changed' | 'unreachable';
+type PendingServer = {
+    generation: number;
+    server: http.Server;
+    wss: WebSocketServer | null;
+};
+type LifecycleOperation = {
+    generation: number;
+    signal: AbortSignal;
+};
+
+export interface WallpaperServerOptions {
+    takeoverPollIntervalMs?: number;
+    scheduleShutdownTask?: (task: () => Promise<void>) => void;
+}
+
+export class WallpaperServerConflictError extends Error {
+    public constructor(port: number) {
+        super(`端口 ${port} 正由另一个窗口用于不同壁纸`);
+        this.name = 'WallpaperServerConflictError';
+    }
+}
 
 async function readBoundedBody(request: http.IncomingMessage, maxBytes: number): Promise<BoundedBodyResult> {
     const declaredLength = Number(request.headers['content-length'] ?? 0);
@@ -130,6 +180,15 @@ function readProjectPreset(content: JsonObject): JsonObject | undefined {
 export class WallpaperServer {
     private server: http.Server | null = null;
     private wss: WebSocketServer | null = null;
+    private pendingServer: PendingServer | null = null;
+    private takeoverMonitor: ServerTakeoverMonitor | null = null;
+    private ownership: ServerOwnership = 'none';
+    private ownerLeaseId = randomUUID();
+    private readonly takeoverPollIntervalMs: number;
+    private lifecycleGeneration = 0;
+    private lifecycleQueue: Promise<void> = Promise.resolve();
+    private lifecycleAbortController: AbortController | null = null;
+    private readonly scheduleShutdownTask: (task: () => Promise<void>) => void;
     private currentRoot: string = '';
     // 端口必须与 injector.ts 里的保持一致
     private PORT = WALLPAPER_SERVER_PORT; 
@@ -155,7 +214,9 @@ export class WallpaperServer {
         return {
             root: this.currentRoot,
             entry: this.entryFile,
-            port: this.PORT
+            port: this.PORT,
+            ownership: this.ownership,
+            instanceId: this.ownerLeaseId
         };
     }
 
@@ -170,7 +231,11 @@ export class WallpaperServer {
         };
     }
 
-    constructor(private context: vscode.ExtensionContext) {
+    constructor(private context: vscode.ExtensionContext, options: WallpaperServerOptions = {}) {
+        this.takeoverPollIntervalMs = options.takeoverPollIntervalMs ?? SERVER_TAKEOVER_POLL_INTERVAL_MS;
+        this.scheduleShutdownTask = options.scheduleShutdownTask ?? (task => {
+            void task();
+        });
         // 插件启动时，尝试恢复之前的服务器状态
         const lastPath = this.context.globalState.get<string>('currentWallpaperPath');
         if (lastPath && fs.existsSync(lastPath)) {
@@ -188,7 +253,9 @@ export class WallpaperServer {
         }
         this.shutdownTimeout = setTimeout(() => {
             console.log('[Server] Auto-shutdown due to inactivity.');
-            this.stop();
+            void this.stop().catch(error => {
+                console.error('[Server] Auto-shutdown failed:', error);
+            });
         }, this.SHUTDOWN_DELAY);
     }
 
@@ -215,77 +282,326 @@ export class WallpaperServer {
         });
     }
 
-    private checkServerStatus(port: number): Promise<{ running: boolean, rootPath: string, entryFile?: string | null } | null> {
+    private checkServerStatus(port: number, signal?: AbortSignal): Promise<ServerStatusProbe> {
         return new Promise((resolve) => {
-            const req = http.get(`http://127.0.0.1:${port}/status`, { agent: false }, (res) => {
+            let settled = false;
+            const finish = (result: ServerStatusProbe) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                resolve(result);
+            };
+            const req = http.get(`http://127.0.0.1:${port}/status`, { agent: false, signal }, (res) => {
                 if (res.statusCode !== 200) {
-                    resolve(null);
+                    res.resume();
+                    finish({ kind: 'occupied' });
                     return;
                 }
                 let data = '';
-                res.on('data', chunk => data += chunk);
+                let bytes = 0;
+                res.on('data', chunk => {
+                    bytes += Buffer.byteLength(chunk);
+                    if (bytes > SERVER_STATUS_RESPONSE_LIMIT) {
+                        res.destroy();
+                        finish({ kind: 'occupied' });
+                        return;
+                    }
+                    data += chunk;
+                });
                 res.on('end', () => {
                     try {
                         const parsed: unknown = JSON.parse(data);
                         if (isJsonObject(parsed)
-                            && typeof parsed.running === 'boolean'
-                            && typeof parsed.rootPath === 'string') {
-                            resolve({
-                                running: parsed.running,
+                            && parsed.service === WALLPAPER_SERVICE_ID
+                            && parsed.protocolVersion === WALLPAPER_SERVICE_PROTOCOL_VERSION
+                            && parsed.running === true
+                            && typeof parsed.rootPath === 'string'
+                            && typeof parsed.instanceId === 'string'
+                            && (typeof parsed.entryFile === 'string' || parsed.entryFile === null)) {
+                            finish({
+                                kind: 'wallpaper',
+                                running: true,
                                 rootPath: parsed.rootPath,
-                                entryFile: typeof parsed.entryFile === 'string' || parsed.entryFile === null
-                                    ? parsed.entryFile
-                                    : undefined
+                                entryFile: parsed.entryFile,
+                                instanceId: parsed.instanceId
                             });
                         } else {
-                            resolve(null);
+                            finish({ kind: 'occupied' });
                         }
                     } catch {
-                        resolve(null);
+                        finish({ kind: 'occupied' });
                     }
                 });
             });
-            req.on('error', () => resolve(null));
+            req.on('error', () => finish({ kind: 'absent' }));
             req.setTimeout(500, () => {
                 req.destroy();
-                resolve(null);
+                finish({ kind: 'absent' });
             });
         });
     }
 
-    private shutdownRemoteServer(port: number): Promise<void> {
+    private shutdownRemoteServer(port: number, instanceId: string): Promise<RemoteShutdownResult> {
         return new Promise((resolve) => {
-            const req = http.get(`http://127.0.0.1:${port}/shutdown`, { agent: false }, (res) => {
-                resolve();
+            let settled = false;
+            const finish = (result: RemoteShutdownResult) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                resolve(result);
+            };
+            const req = http.request({
+                host: '127.0.0.1',
+                port,
+                path: '/shutdown',
+                method: 'POST',
+                agent: false,
+                headers: { 'X-Vscode-Wallpaper-Owner': instanceId }
+            }, (res) => {
+                res.resume();
+                finish(res.statusCode === 200
+                    ? 'accepted'
+                    : res.statusCode === 409
+                        ? 'owner-changed'
+                        : 'unreachable');
             });
-            req.on('error', () => resolve());
+            req.on('error', () => finish('unreachable'));
             req.setTimeout(1000, () => {
                 req.destroy();
-                resolve();
+                finish('unreachable');
             });
+            req.end();
         });
     }
 
-    public async start(rootPath: string, port: number, entryFile?: string, location?: string, silent = false): Promise<void> {
+    private stopTakeoverMonitor(reportCancellation = true): void {
+        this.takeoverMonitor?.stop(reportCancellation);
+        this.takeoverMonitor = null;
+        if (!this.server) {
+            this.ownership = 'none';
+        }
+    }
+
+    private startFollowingExternalServer(
+        rootPath: string,
+        port: number,
+        entryFile: string | null,
+        location: string | undefined,
+        ownerInstanceId: string,
+        operation: LifecycleOperation
+    ): void {
+        this.stopTakeoverMonitor(false);
+        this.ownership = 'external';
+        let observedOwnerId = ownerInstanceId;
+        const monitor = new ServerTakeoverMonitor({
+            pollIntervalMs: this.takeoverPollIntervalMs,
+            probe: async signal => {
+                const status = await this.checkServerStatus(port, signal);
+                if (status.kind === 'absent') {
+                    return 'absent';
+                }
+                if (status.kind === 'occupied') {
+                    return 'occupied';
+                }
+                if (status.rootPath !== rootPath || status.entryFile !== entryFile) {
+                    return 'mismatched';
+                }
+                observedOwnerId = status.instanceId;
+                return 'matching';
+            },
+            claim: async signal => {
+                if (signal.aborted) {
+                    return 'contended';
+                }
+                try {
+                    await this.enqueueLifecycle(async () => {
+                        if (signal.aborted) {
+                            throw new WallpaperServerOperationCancelledError();
+                        }
+                        await this.startInternal(
+                            rootPath,
+                            port,
+                            entryFile ?? undefined,
+                            location,
+                            true,
+                            'takeover',
+                            operation,
+                            false
+                        );
+                    });
+                    return 'claimed';
+                } catch (error) {
+                    if (signal.aborted
+                        || operation.signal.aborted
+                        || operation.generation !== this.lifecycleGeneration) {
+                        return 'contended';
+                    }
+                    if (this.isAddressInUseError(error)) {
+                        return 'contended';
+                    }
+                    throw error;
+                }
+            },
+            schedule: scheduleTakeoverTask,
+            report: (event, error) => this.reportTakeoverEvent(event, port, observedOwnerId, error)
+        });
+        this.takeoverMonitor = monitor;
+        monitor.start();
+    }
+
+    private reportTakeoverEvent(
+        event: ServerTakeoverEvent,
+        port: number,
+        ownerInstanceId: string,
+        error?: unknown
+    ): void {
+        const owner = ownerInstanceId.slice(0, 8);
+        if (event === 'claim-won') {
+            this.ownership = 'local';
+        } else if (event === 'superseded' || event === 'terminal-error') {
+            this.ownership = 'none';
+        }
+        const detail = error instanceof Error ? `: ${error.message}` : '';
+        console.log(`[Server takeover] ${event} port=${port} owner=${owner}${detail}`);
+    }
+
+    private isAddressInUseError(error: unknown): boolean {
+        return error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+    }
+
+    private beginLifecycleOperation(): LifecycleOperation {
+        this.lifecycleAbortController?.abort();
+        const controller = new AbortController();
+        this.lifecycleAbortController = controller;
+        this.lifecycleGeneration += 1;
+        return { generation: this.lifecycleGeneration, signal: controller.signal };
+    }
+
+    private enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
+        const result = this.lifecycleQueue.then(task, task);
+        this.lifecycleQueue = result.then(() => undefined, () => undefined);
+        return result;
+    }
+
+    private assertCurrentOperation(operation: LifecycleOperation): void {
+        if (operation.signal.aborted || operation.generation !== this.lifecycleGeneration) {
+            throw new WallpaperServerOperationCancelledError();
+        }
+    }
+
+    private waitForLifecycleDelay(delayMs: number, operation: LifecycleOperation): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (operation.signal.aborted) {
+                reject(new WallpaperServerOperationCancelledError());
+                return;
+            }
+            const finish = () => {
+                operation.signal.removeEventListener('abort', abort);
+                resolve();
+            };
+            const timer = setTimeout(finish, delayMs);
+            const abort = () => {
+                clearTimeout(timer);
+                operation.signal.removeEventListener('abort', abort);
+                reject(new WallpaperServerOperationCancelledError());
+            };
+            operation.signal.addEventListener('abort', abort, { once: true });
+        });
+    }
+
+    private async persistWallpaperState(
+        rootPath: string,
+        entryFile: string | null,
+        location: string | undefined,
+        operation: LifecycleOperation
+    ): Promise<void> {
+        const keys = [
+            ['currentWallpaperPath', rootPath],
+            ['currentWallpaperEntry', entryFile],
+            ['currentWallpaperLocation', location]
+        ] as const;
+        const previous = keys.map(([key]) => [key, this.context.globalState.get<unknown>(key)] as const);
+        let completed = 0;
+        try {
+            for (const [key, value] of keys) {
+                await this.context.globalState.update(key, value);
+                completed += 1;
+                this.assertCurrentOperation(operation);
+            }
+        } catch (error) {
+            for (let index = completed - 1; index >= 0; index -= 1) {
+                const [key, value] = previous[index];
+                try {
+                    await this.context.globalState.update(key, value);
+                } catch (rollbackError) {
+                    console.error(`[Server] Failed to roll back persisted state ${key}:`, rollbackError);
+                }
+            }
+            throw error;
+        }
+    }
+
+    public start(
+        rootPath: string,
+        port: number,
+        entryFile?: string,
+        location?: string,
+        silent = false,
+        allowRemoteHandoff = false
+    ): Promise<void> {
+        const operation = this.beginLifecycleOperation();
+        this.takeoverMonitor?.stop();
+        this.takeoverMonitor = null;
+        return this.enqueueLifecycle(() => this.startInternal(
+            rootPath,
+            port,
+            entryFile,
+            location,
+            silent,
+            'normal',
+            operation,
+            allowRemoteHandoff
+        ));
+    }
+
+    private async startInternal(
+        rootPath: string,
+        port: number,
+        entryFile: string | undefined,
+        location: string | undefined,
+        silent: boolean,
+        mode: 'normal' | 'takeover',
+        operation: LifecycleOperation,
+        allowRemoteHandoff: boolean
+    ): Promise<void> {
+        this.assertCurrentOperation(operation);
+        if (mode === 'normal') {
+            this.stopTakeoverMonitor(false);
+        }
         // 每次启动或热切换都必须丢弃旧页面的播放结论。
-        this.playbackMonitor.reset();
-        this.lastPlaybackLogAt = 0;
-        this.loggedPlaybackTerminalStates.clear();
+        if (mode === 'normal') {
+            this.playbackMonitor.reset();
+            this.lastPlaybackLogAt = 0;
+            this.loggedPlaybackTerminalStates.clear();
+        }
         console.log(`[server launch] start called. root: ${rootPath}, port: ${port}, entry: ${entryFile}, loc: ${location}`);
         vscode.window.setStatusBarMessage(`Preparing Wallpaper Server...`, 5000);
         
         // 1. Check local instance
         if (this.server && this.PORT === port) {
-            if (this.currentRoot === rootPath && this.entryFile === (entryFile || null)) {
+            this.ownership = 'local';
+            if (this.currentRoot === rootPath && this.entryFile === (entryFile ?? null)) {
                 return;
             } else {
                 console.log(`[Server] Hot swapping root to ${rootPath}`);
+                await this.persistWallpaperState(rootPath, entryFile ?? null, location, operation);
+                this.assertCurrentOperation(operation);
                 this.currentRoot = rootPath;
-                this.entryFile = entryFile || null;
+                this.entryFile = entryFile ?? null;
                 this.currentLocation = location;
-                await this.context.globalState.update('currentWallpaperPath', rootPath);
-                await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
-                await this.context.globalState.update('currentWallpaperLocation', location);
+                this.ownerLeaseId = randomUUID();
                 this.updateSearchPaths(rootPath, location);
                 this.triggerReload();
                 return;
@@ -294,65 +610,110 @@ export class WallpaperServer {
 
         if (this.server) {
             console.log(`[Server] Port changed from ${this.PORT} to ${port}; rebinding server.`);
-            await this.stop();
+            await this.stopLocalResources();
+            this.assertCurrentOperation(operation);
+            this.ownership = 'none';
         }
-        this.PORT = port;
 
         // 2. Check external instance (Multi-window support)
-        const status = await this.checkServerStatus(port);
-        if (status && status.running) {
-            if (status.rootPath === rootPath && status.entryFile === (entryFile || null)) {
-                console.log(`[Server] Reusing existing server for ${rootPath}`);
-                this.currentRoot = rootPath;
-                this.entryFile = entryFile || null;
-                this.currentLocation = location;
-                this.updateSearchPaths(rootPath, location);
-                await this.context.globalState.update('currentWallpaperPath', rootPath);
-                await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
-                await this.context.globalState.update('currentWallpaperLocation', location);
-                return;
-            } else {
-                console.log(`[Server] Existing server running different path (${status.rootPath}). Restarting...`);
-                await this.shutdownRemoteServer(port);
-                // Wait for port to be released
-                console.log('[server launch] Waiting for port release...');
-                let attempts = 0;
-                while (attempts < 20) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    const s = await this.checkServerStatus(port);
-                    if (!s) {
-                        console.log('[server launch] Port released.');
-                        break;
+        if (mode === 'normal') {
+            const status = await this.checkServerStatus(port, operation.signal);
+            this.assertCurrentOperation(operation);
+            if (status.kind === 'wallpaper') {
+                if (status.rootPath === rootPath && status.entryFile === (entryFile ?? null)) {
+                    console.log(`[Server] Reusing existing server for ${rootPath}`);
+                    await this.persistWallpaperState(rootPath, entryFile ?? null, location, operation);
+                    this.assertCurrentOperation(operation);
+                    this.currentRoot = rootPath;
+                    this.entryFile = entryFile ?? null;
+                    this.currentLocation = location;
+                    this.PORT = port;
+                    this.updateSearchPaths(rootPath, location);
+                    this.startFollowingExternalServer(
+                        rootPath,
+                        port,
+                        this.entryFile,
+                        location,
+                        status.instanceId,
+                        operation
+                    );
+                    return;
+                } else {
+                    if (!allowRemoteHandoff) {
+                        throw new WallpaperServerConflictError(port);
                     }
-                    console.log(`[server launch] Port still busy (attempt ${attempts + 1})...`);
-                    // Try to shutdown again periodically
-                    if (attempts % 5 === 0) {
-                        await this.shutdownRemoteServer(port);
+                    const observedInstanceId = status.instanceId;
+                    console.log(`[Server] Existing server running different path (${status.rootPath}). Restarting...`);
+                    const shutdown = await this.shutdownRemoteServer(port, observedInstanceId);
+                    this.assertCurrentOperation(operation);
+                    if (shutdown !== 'accepted') {
+                        throw new WallpaperServerConflictError(port);
                     }
-                    attempts++;
-                }
-                
-                // Final check
-                const finalStatus = await this.checkServerStatus(port);
-                if (finalStatus && finalStatus.running) {
-                    const msg = `Port ${port} is still occupied by another process. Please close other VS Code windows or kill the process manually.`;
-                    console.error(`[server launch] ${msg}`);
-                    throw new Error(msg);
+                    console.log('[server launch] Waiting for port release...');
+                    let attempts = 0;
+                    while (attempts < 20) {
+                        await this.waitForLifecycleDelay(500, operation);
+                        const currentStatus = await this.checkServerStatus(port, operation.signal);
+                        this.assertCurrentOperation(operation);
+                        if (currentStatus.kind === 'absent') {
+                            console.log('[server launch] Port released.');
+                            break;
+                        }
+                        console.log(`[server launch] Port still busy (attempt ${attempts + 1})...`);
+                        if (currentStatus.kind === 'wallpaper'
+                            && currentStatus.instanceId === observedInstanceId
+                            && attempts % 5 === 0) {
+                            const retryShutdown = await this.shutdownRemoteServer(port, observedInstanceId);
+                            this.assertCurrentOperation(operation);
+                            if (retryShutdown === 'owner-changed') {
+                                throw new WallpaperServerConflictError(port);
+                            }
+                        }
+                        attempts += 1;
+                    }
+
+                    const finalStatus = await this.checkServerStatus(port, operation.signal);
+                    this.assertCurrentOperation(operation);
+                    if (finalStatus.kind !== 'absent') {
+                        const msg = `Port ${port} is still occupied by another process. Please close other VS Code windows or kill the process manually.`;
+                        console.error(`[server launch] ${msg}`);
+                        throw new Error(msg);
+                    }
                 }
             }
         }
 
         // 关闭旧服务
-        await this.stop();
+        await this.stopLocalResources();
+        this.assertCurrentOperation(operation);
 
+        const previousMetadata = {
+            root: this.currentRoot,
+            entry: this.entryFile,
+            location: this.currentLocation,
+            port: this.PORT,
+            searchPaths: [...this.searchPaths],
+            ownerLeaseId: this.ownerLeaseId,
+            ownership: this.ownership
+        };
         this.currentRoot = rootPath;
-        this.entryFile = entryFile || null;
+        this.entryFile = entryFile ?? null;
         this.currentLocation = location;
+        this.ownerLeaseId = randomUUID();
         
         this.updateSearchPaths(rootPath, location); // [New] Update search paths on server start
+        const restoreMetadata = () => {
+            this.currentRoot = previousMetadata.root;
+            this.entryFile = previousMetadata.entry;
+            this.currentLocation = previousMetadata.location;
+            this.PORT = previousMetadata.port;
+            this.searchPaths = previousMetadata.searchPaths;
+            this.ownerLeaseId = previousMetadata.ownerLeaseId;
+            this.ownership = previousMetadata.ownership;
+        };
 
         console.log(`[server launch] Creating HTTP server...`);
-        this.server = http.createServer((req, res) => {
+        const candidateServer = http.createServer((req, res) => {
             const isHighFrequencyEndpoint = req.url?.startsWith('/media/current')
                 || req.url?.startsWith('/playback-event')
                 || req.url?.startsWith('/playback-status');
@@ -377,6 +738,11 @@ export class WallpaperServer {
             }
 
             if (req.method === 'OPTIONS') {
+                if (reqUrl === '/shutdown') {
+                    res.statusCode = 403;
+                    res.end('Cross-origin shutdown is not allowed');
+                    return;
+                }
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 const allowedMethods = reqUrl === '/media/current'
                     ? 'GET, HEAD, OPTIONS'
@@ -461,8 +827,10 @@ export class WallpaperServer {
             // [New] Status endpoint for multi-instance check
             if (reqUrl === '/status') {
                 res.setHeader('Content-Type', 'application/json');
-                res.setHeader('Access-Control-Allow-Origin', '*');
                 res.end(JSON.stringify({
+                    service: WALLPAPER_SERVICE_ID,
+                    protocolVersion: WALLPAPER_SERVICE_PROTOCOL_VERSION,
+                    instanceId: this.ownerLeaseId,
                     running: true,
                     rootPath: this.currentRoot,
                     entryFile: this.entryFile
@@ -472,12 +840,35 @@ export class WallpaperServer {
 
             // [New] Shutdown endpoint for multi-instance takeover
             if (reqUrl === '/shutdown') {
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.end('ok');
-                setTimeout(() => {
-                    console.log('[Server] Remote shutdown requested.');
-                    this.stop();
-                }, 100);
+                if (req.method !== 'POST') {
+                    res.statusCode = 405;
+                    res.setHeader('Allow', 'POST');
+                    res.end('Method Not Allowed');
+                    return;
+                }
+                const requestedInstanceId = req.headers['x-vscode-wallpaper-owner'];
+                const acceptedLeaseId = this.ownerLeaseId;
+                const acceptedGeneration = this.lifecycleGeneration;
+                if (requestedInstanceId !== acceptedLeaseId) {
+                    res.statusCode = 409;
+                    res.end('Server owner changed');
+                    return;
+                }
+                res.end('ok', () => {
+                    this.scheduleShutdownTask(async () => {
+                        if (this.ownerLeaseId !== acceptedLeaseId
+                            || this.lifecycleGeneration !== acceptedGeneration) {
+                            console.log('[Server] Ignoring stale remote shutdown request.');
+                            return;
+                        }
+                        console.log('[Server] Remote shutdown requested.');
+                        try {
+                            await this.stop();
+                        } catch (error) {
+                            console.error('[Server] Remote shutdown failed:', error);
+                        }
+                    });
+                });
                 return;
             }
 
@@ -981,18 +1372,22 @@ ${baseTag}
 
         });
 
+        this.pendingServer = { generation: operation.generation, server: candidateServer, wss: null };
+
         // Initialize WebSocket Server
+        let candidateWss: WebSocketServer | null = null;
         try {
             console.log(`[Server] Initializing WebSocket Server`);
-            this.wss = new WebSocketServer({ noServer: true });
+            candidateWss = new WebSocketServer({ noServer: true });
+            this.pendingServer.wss = candidateWss;
             
-            this.server.on('upgrade', (request, socket, head) => {
-                this.wss?.handleUpgrade(request, socket, head, (ws) => {
-                    this.wss?.emit('connection', ws, request);
+            candidateServer.on('upgrade', (request, socket, head) => {
+                candidateWss?.handleUpgrade(request, socket, head, (ws) => {
+                    candidateWss?.emit('connection', ws, request);
                 });
             });
 
-            this.wss.on('connection', (ws) => {
+            candidateWss.on('connection', (ws) => {
                 console.log('[Server] WebSocket connected');
                 ws.on('message', (message) => {
                     // Optional: Handle messages from clients
@@ -1000,33 +1395,58 @@ ${baseTag}
             });
         } catch (error) {
             console.error('[Server] Failed to initialize WebSocket Server:', error);
-            await this.stop();
+            await this.discardPendingServer(operation.generation, candidateServer, candidateWss);
+            restoreMetadata();
+            if (mode === 'normal') {
+                this.ownership = 'none';
+            }
             throw error;
         }
         
         console.log(`[server launch] Setting up server listeners`);
+        const pendingListenController = new AbortController();
+        const abortPendingListen = () => pendingListenController.abort();
+        operation.signal.addEventListener('abort', abortPendingListen, { once: true });
         try {
-            const listening = waitForServerListening(this.server, SERVER_STARTUP_TIMEOUT_MS);
+            const listening = waitForServerListening(candidateServer, SERVER_STARTUP_TIMEOUT_MS);
             try {
-                this.server.listen(this.PORT, '127.0.0.1');
+                candidateServer.listen({ port, host: '127.0.0.1', signal: pendingListenController.signal });
             } catch (error) {
-                this.server.emit('error', error instanceof Error ? error : new Error(String(error)));
+                candidateServer.emit('error', error instanceof Error ? error : new Error(String(error)));
             }
             await listening;
-            const address = this.server.address();
+            this.assertCurrentOperation(operation);
+            const address = candidateServer.address();
             if (address && typeof address !== 'string') {
-                this.PORT = address.port;
+                port = address.port;
             }
         } catch (error) {
             console.error('[server launch] Server failed to listen:', error);
-            await this.stop();
+            await this.discardPendingServer(operation.generation, candidateServer, candidateWss);
+            restoreMetadata();
+            if (mode === 'normal') {
+                this.ownership = 'none';
+            }
+            throw error;
+        } finally {
+            operation.signal.removeEventListener('abort', abortPendingListen);
+        }
+
+        try {
+            await this.persistWallpaperState(rootPath, this.entryFile, location, operation);
+            this.assertCurrentOperation(operation);
+        } catch (error) {
+            await this.discardPendingServer(operation.generation, candidateServer, candidateWss);
+            restoreMetadata();
             throw error;
         }
 
+        this.pendingServer = null;
+        this.server = candidateServer;
+        this.wss = candidateWss;
+        this.PORT = port;
+        this.ownership = 'local';
         this.resetShutdownTimer();
-        await this.context.globalState.update('currentWallpaperPath', rootPath);
-        await this.context.globalState.update('currentWallpaperEntry', this.entryFile);
-        await this.context.globalState.update('currentWallpaperLocation', location);
         console.log(`[server launch] Wallpaper Server started on port ${this.PORT}${silent ? ' (silent)' : ''}`);
     }
 
@@ -1044,9 +1464,19 @@ ${baseTag}
             throw new WallpaperPreflightError('health', `壁纸服务器健康检查返回 HTTP ${response.statusCode}`);
         }
         try {
-            const status = JSON.parse(response.body) as { running?: boolean; rootPath?: string; entryFile?: string | null };
-            if (status.running !== true) {
-                throw new Error('running 状态无效');
+            const status = JSON.parse(response.body) as {
+                service?: string;
+                protocolVersion?: number;
+                instanceId?: string;
+                running?: boolean;
+                rootPath?: string;
+                entryFile?: string | null;
+            };
+            if (status.service !== WALLPAPER_SERVICE_ID
+                || status.protocolVersion !== WALLPAPER_SERVICE_PROTOCOL_VERSION
+                || typeof status.instanceId !== 'string'
+                || status.running !== true) {
+                throw new Error('服务身份或 running 状态无效');
             }
             if (expected) {
                 if (path.resolve(status.rootPath || '') !== path.resolve(expected.rootPath)) {
@@ -1283,28 +1713,78 @@ ${baseTag}
         console.log(`[add file] Final searchPaths: ${JSON.stringify(this.searchPaths)}`);
     }
 
-    public async stop(): Promise<void> {
+    public stop(): Promise<void> {
+        this.beginLifecycleOperation();
+        this.takeoverMonitor?.stop();
+        this.takeoverMonitor = null;
+        return this.enqueueLifecycle(async () => {
+            this.ownership = 'none';
+            await this.stopLocalResources();
+        });
+    }
+
+    private async discardPendingServer(
+        generation: number,
+        server: http.Server,
+        wss: WebSocketServer | null
+    ): Promise<void> {
+        if (this.pendingServer?.generation === generation && this.pendingServer.server === server) {
+            this.pendingServer = null;
+        }
+        await this.closeServerResources(server, wss);
+    }
+
+    private async closeServerResources(server: http.Server, wss: WebSocketServer | null): Promise<void> {
+        await this.closeWebSocketResources(wss);
+        if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+        }
+        await new Promise<void>((resolve, reject) => {
+            if (!server.listening) {
+                resolve();
+                return;
+            }
+            server.close(error => error ? reject(error) : resolve());
+        });
+    }
+
+    private async closeWebSocketResources(wss: WebSocketServer | null): Promise<void> {
+        if (!wss) {
+            return;
+        }
+        for (const client of wss.clients) {
+            client.terminate();
+        }
+        await new Promise<void>(resolve => {
+            try {
+                wss.close(() => resolve());
+            } catch (error) {
+                console.error('[Server] Failed to close WebSocket server:', error);
+                resolve();
+            }
+        });
+    }
+
+    private async stopLocalResources(): Promise<void> {
         if (this.shutdownTimeout) {
             clearTimeout(this.shutdownTimeout);
             this.shutdownTimeout = null;
         }
-        if (this.wss) {
-            this.wss.close();
-            this.wss = null;
+        if (this.pendingServer) {
+            const pending = this.pendingServer;
+            this.pendingServer = null;
+            await this.closeServerResources(pending.server, pending.wss);
         }
         if (this.server) {
             const activeServer = this.server;
+            const activeWss = this.wss;
             this.server = null;
-            if (typeof activeServer.closeAllConnections === 'function') {
-                activeServer.closeAllConnections();
-            }
-            await new Promise<void>((resolve, reject) => {
-                if (!activeServer.listening) {
-                    resolve();
-                    return;
-                }
-                activeServer.close(error => error ? reject(error) : resolve());
-            });
+            this.wss = null;
+            await this.closeServerResources(activeServer, activeWss);
+        } else if (this.wss) {
+            const orphanedWss = this.wss;
+            this.wss = null;
+            await this.closeWebSocketResources(orphanedWss);
         }
         if (this.reloadWaiter) {
             clearTimeout(this.reloadWaiter.timer);

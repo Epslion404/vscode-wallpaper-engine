@@ -5,10 +5,12 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { WebSocket, WebSocketServer } from 'ws';
 import {
     validateWallpaperMedia,
     waitForServerListening,
     WallpaperServer,
+    WallpaperServerConflictError,
     WallpaperServerStartupTimeoutError,
     PersistedWallpaperStateError
 } from '../core/server';
@@ -32,6 +34,41 @@ function createContext(): vscode.ExtensionContext {
     return { globalState } as unknown as vscode.ExtensionContext;
 }
 
+function createBlockingContext(blockKey: string) {
+    const values = new Map<string, unknown>();
+    let releaseGate: (() => void) | undefined;
+    let enteredGate: (() => void) | undefined;
+    let blocked = false;
+    const gate = new Promise<void>(resolve => {
+        releaseGate = resolve;
+    });
+    const entered = new Promise<void>(resolve => {
+        enteredGate = resolve;
+    });
+    const globalState = {
+        get<T>(key: string): T | undefined {
+            return values.get(key) as T | undefined;
+        },
+        async update(key: string, value: unknown): Promise<void> {
+            if (key === blockKey && !blocked) {
+                blocked = true;
+                enteredGate?.();
+                await gate;
+            }
+            values.set(key, value);
+        },
+        keys(): readonly string[] {
+            return [...values.keys()];
+        },
+        setKeysForSync(): void {}
+    };
+    return {
+        context: { globalState } as unknown as vscode.ExtensionContext,
+        entered,
+        release: () => releaseGate?.()
+    };
+}
+
 function listen(server: http.Server): Promise<number> {
     return new Promise((resolve, reject) => {
         server.once('error', reject);
@@ -50,6 +87,16 @@ function close(server: http.Server): Promise<void> {
     return new Promise((resolve, reject) => {
         server.close(error => error ? reject(error) : resolve());
     });
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1500): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate()) {
+        if (Date.now() >= deadline) {
+            throw new Error(`等待条件超时（${timeoutMs} 毫秒）`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
 }
 
 function abortMediaRequest(port: number): Promise<void> {
@@ -118,6 +165,30 @@ suite('WallpaperServer lifecycle and preflight', () => {
         }
     });
 
+    test('does not trust an occupied port that only mimics the legacy status shape', async () => {
+        const legacy = http.createServer((request, response) => {
+            if (request.url === '/status') {
+                response.setHeader('Content-Type', 'application/json');
+                response.end(JSON.stringify({ running: true, rootPath: root, entryFile: 'index.html' }));
+                return;
+            }
+            response.statusCode = 404;
+            response.end();
+        });
+        const port = await listen(legacy);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await assert.rejects(
+                server.start(root, port, 'index.html', root, true),
+                error => error instanceof Error && 'code' in error && error.code === 'EADDRINUSE'
+            );
+            assert.strictEqual(server.getCurrentInfo().ownership, 'none');
+        } finally {
+            await close(legacy);
+        }
+    });
+
     test('changing ports closes the old socket before binding the new one', async () => {
         server = new WallpaperServer(createContext());
         await server.start(root, 0, 'index.html', root, true);
@@ -149,6 +220,177 @@ suite('WallpaperServer lifecycle and preflight', () => {
         } finally {
             await close(blocker);
         }
+    });
+
+    test('stop cancels an in-flight start before it can commit or leave a listener', async function () {
+        this.timeout(3000);
+        const portProbe = http.createServer();
+        const port = await listen(portProbe);
+        await close(portProbe);
+        const blocking = createBlockingContext('currentWallpaperPath');
+        server = new WallpaperServer(blocking.context);
+
+        const starting = server.start(root, port, 'index.html', root, true);
+        await blocking.entered;
+        const stopping = server.stop();
+        blocking.release();
+
+        await assert.rejects(starting, error => error instanceof Error
+            && error.name === 'WallpaperServerOperationCancelledError');
+        await stopping;
+        assert.strictEqual(server.getCurrentInfo().ownership, 'none');
+
+        const rebound = http.createServer();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                rebound.once('error', reject);
+                rebound.listen(port, '127.0.0.1', resolve);
+            });
+        } finally {
+            await close(rebound);
+        }
+    });
+
+    test('a newer start supersedes an in-flight start without binding the old port', async function () {
+        this.timeout(4000);
+        const firstProbe = http.createServer();
+        const firstPort = await listen(firstProbe);
+        await close(firstProbe);
+        const secondProbe = http.createServer();
+        const secondPort = await listen(secondProbe);
+        await close(secondProbe);
+        const blocking = createBlockingContext('currentWallpaperPath');
+        server = new WallpaperServer(blocking.context);
+
+        const firstStart = server.start(root, firstPort, 'index.html', root, true);
+        await blocking.entered;
+        const secondStart = server.start(root, secondPort, 'index.html', root, true);
+        blocking.release();
+
+        await assert.rejects(firstStart, error => error instanceof Error
+            && error.name === 'WallpaperServerOperationCancelledError');
+        await secondStart;
+        assert.strictEqual(server.getCurrentInfo().port, secondPort);
+        assert.strictEqual(server.getCurrentInfo().ownership, 'local');
+
+        const oldPortProbe = http.createServer();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                oldPortProbe.once('error', reject);
+                oldPortProbe.listen(firstPort, '127.0.0.1', resolve);
+            });
+        } finally {
+            await close(oldPortProbe);
+        }
+        await server.verifyHealth();
+    });
+
+    test('persistence failure closes the candidate and rolls back partial state', async () => {
+        const portProbe = http.createServer();
+        const port = await listen(portProbe);
+        await close(portProbe);
+        const values = new Map<string, unknown>();
+        const context = {
+            globalState: {
+                get<T>(key: string): T | undefined {
+                    return values.get(key) as T | undefined;
+                },
+                update(key: string, value: unknown): Thenable<void> {
+                    if (key === 'currentWallpaperEntry') {
+                        return Promise.reject(new Error('persist failed'));
+                    }
+                    values.set(key, value);
+                    return Promise.resolve();
+                }
+            }
+        } as unknown as vscode.ExtensionContext;
+        server = new WallpaperServer(context);
+
+        await assert.rejects(server.start(root, port, 'index.html', root, true), /persist failed/);
+        assert.strictEqual(server.getCurrentInfo().ownership, 'none');
+        assert.strictEqual(values.get('currentWallpaperPath'), undefined);
+
+        const rebound = http.createServer();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                rebound.once('error', reject);
+                rebound.listen(port, '127.0.0.1', resolve);
+            });
+        } finally {
+            await close(rebound);
+        }
+    });
+
+    test('stop terminates active WebSocket clients before releasing the port', async function () {
+        this.timeout(3000);
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+        const port = server.getCurrentInfo().port;
+        const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((resolve, reject) => {
+            socket.once('open', resolve);
+            socket.once('error', reject);
+        });
+
+        await server.stop();
+        await waitForCondition(() => socket.readyState === WebSocket.CLOSED);
+
+        const rebound = http.createServer();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                rebound.once('error', reject);
+                rebound.listen(port, '127.0.0.1', resolve);
+            });
+        } finally {
+            await close(rebound);
+        }
+    });
+
+    test('stop waits for an orphaned WebSocket server to close exactly once', async () => {
+        server = new WallpaperServer(createContext());
+        let terminateCalls = 0;
+        let closeCalls = 0;
+        let releaseClose: (() => void) | undefined;
+        let reportCloseStarted: (() => void) | undefined;
+        const closeStarted = new Promise<void>(resolve => {
+            reportCloseStarted = resolve;
+        });
+        const client = {
+            terminate(): void {
+                terminateCalls += 1;
+            }
+        };
+        const orphanedWss = {
+            clients: new Set([client]),
+            close(callback: () => void): void {
+                closeCalls += 1;
+                releaseClose = callback;
+                reportCloseStarted?.();
+            }
+        } as unknown as WebSocketServer;
+        const resources = server as unknown as {
+            server: http.Server | null;
+            wss: WebSocketServer | null;
+        };
+        resources.server = null;
+        resources.wss = orphanedWss;
+
+        let stopped = false;
+        const stopping = server.stop().then(() => {
+            stopped = true;
+        });
+        await closeStarted;
+
+        assert.strictEqual(terminateCalls, 1);
+        assert.strictEqual(closeCalls, 1);
+        assert.strictEqual(stopped, false);
+        releaseClose?.();
+        await stopping;
+        assert.strictEqual(stopped, true);
+
+        await server.stop();
+        assert.strictEqual(terminateCalls, 1);
+        assert.strictEqual(closeCalls, 1);
     });
 
     test('waitForServerListening rejects when listening does not complete before timeout', async () => {
@@ -401,6 +643,9 @@ suite('WallpaperServer lifecycle and preflight', () => {
             if (request.url === '/status') {
                 response.setHeader('Content-Type', 'application/json');
                 response.end(JSON.stringify({
+                    service: 'vscode-wallpaper-engine',
+                    protocolVersion: 1,
+                    instanceId: 'external-test-owner',
                     running: true,
                     rootPath: root,
                     entryFile: 'index.html'
@@ -425,9 +670,285 @@ suite('WallpaperServer lifecycle and preflight', () => {
 
         try {
             await server.start(root, port, 'index.html', root, true);
+            assert.strictEqual(server.getCurrentInfo().ownership, 'external');
             await server.verifyPlaybackReady('web', 500);
         } finally {
+            await server.stop();
             await close(external);
+        }
+    });
+
+    test('does not replace a different wallpaper owner without explicit handoff', async () => {
+        const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wallpaper-server-conflict-'));
+        fs.writeFileSync(path.join(otherRoot, 'index.html'), '<!doctype html><html><body>other</body></html>');
+        const owner = new WallpaperServer(createContext());
+        const contender = new WallpaperServer(createContext());
+        server = contender;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        try {
+            await assert.rejects(
+                contender.start(otherRoot, port, 'index.html', otherRoot, true),
+                WallpaperServerConflictError
+            );
+            assert.strictEqual(owner.getCurrentInfo().ownership, 'local');
+            assert.strictEqual(contender.getCurrentInfo().ownership, 'none');
+            await owner.verifyHealth(500, { rootPath: root, entryFile: 'index.html' });
+        } finally {
+            await contender.stop();
+            await owner.stop();
+            fs.rmSync(otherRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('explicit handoff replaces a different wallpaper owner with the observed lease', async function () {
+        this.timeout(4000);
+        const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wallpaper-server-handoff-'));
+        fs.writeFileSync(path.join(otherRoot, 'index.html'), '<!doctype html><html><body>other</body></html>');
+        const owner = new WallpaperServer(createContext());
+        const contender = new WallpaperServer(createContext());
+        server = contender;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        try {
+            await contender.start(otherRoot, port, 'index.html', otherRoot, true, true);
+            assert.strictEqual(contender.getCurrentInfo().ownership, 'local');
+            assert.strictEqual(contender.getCurrentInfo().port, port);
+            await contender.verifyHealth(500, { rootPath: otherRoot, entryFile: 'index.html' });
+        } finally {
+            await contender.stop();
+            await owner.stop();
+            fs.rmSync(otherRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('shutdown endpoint rejects browser-style and stale-owner requests', async () => {
+        fs.writeFileSync(path.join(root, 'other.html'), '<!doctype html><html><body>other</body></html>');
+        server = new WallpaperServer(createContext());
+        await server.start(root, 0, 'index.html', root, true);
+        const port = server.getCurrentInfo().port;
+        const staleLease = server.getCurrentInfo().instanceId;
+        const base = `http://127.0.0.1:${port}`;
+
+        const status = await fetch(`${base}/status`);
+        assert.strictEqual(status.headers.get('access-control-allow-origin'), null);
+        assert.strictEqual((await fetch(`${base}/shutdown`)).status, 405);
+        assert.strictEqual((await fetch(`${base}/shutdown`, { method: 'OPTIONS' })).status, 403);
+
+        await server.start(root, port, 'other.html', root, true);
+        assert.notStrictEqual(server.getCurrentInfo().instanceId, staleLease);
+        const stale = await fetch(`${base}/shutdown`, {
+            method: 'POST',
+            headers: { 'X-Vscode-Wallpaper-Owner': staleLease }
+        });
+        assert.strictEqual(stale.status, 409);
+        await server.verifyHealth(500, { rootPath: root, entryFile: 'other.html' });
+    });
+
+    test('ignores a delayed shutdown task from an older same-configuration lifecycle', async () => {
+        let deliverShutdownTask: ((task: () => Promise<void>) => void) | undefined;
+        const scheduledShutdownTask = new Promise<() => Promise<void>>(resolve => {
+            deliverShutdownTask = resolve;
+        });
+        server = new WallpaperServer(createContext(), {
+            scheduleShutdownTask: task => deliverShutdownTask?.(task)
+        });
+        await server.start(root, 0, 'index.html', root, true);
+        const initial = server.getCurrentInfo();
+        const response = await fetch(`http://127.0.0.1:${initial.port}/shutdown`, {
+            method: 'POST',
+            headers: { 'X-Vscode-Wallpaper-Owner': initial.instanceId }
+        });
+        assert.strictEqual(response.status, 200);
+        await response.text();
+        const staleShutdownTask = await scheduledShutdownTask;
+
+        await server.start(root, initial.port, 'index.html', root, true);
+        assert.strictEqual(server.getCurrentInfo().instanceId, initial.instanceId);
+        await staleShutdownTask();
+
+        assert.strictEqual(server.getCurrentInfo().ownership, 'local');
+        await server.verifyHealth(500, { rootPath: root, entryFile: 'index.html' });
+        await server.verifyEntry();
+    });
+
+    test('takes over a matching external server after its owner exits', async function () {
+        this.timeout(3000);
+        const owner = new WallpaperServer(createContext());
+        const follower = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = follower;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        try {
+            await follower.start(root, port, 'index.html', root, true);
+            assert.strictEqual(follower.getCurrentInfo().ownership, 'external');
+            await owner.stop();
+
+            const deadline = Date.now() + 1200;
+            let healthy = false;
+            while (Date.now() < deadline) {
+                try {
+                    await follower.verifyHealth(100);
+                    healthy = true;
+                    break;
+                } catch {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+            }
+
+            assert.strictEqual(healthy, true, 'follower did not take over the released server port');
+            assert.strictEqual(follower.getCurrentInfo().port, port);
+            assert.strictEqual(follower.getCurrentInfo().ownership, 'local');
+            await follower.verifyEntry();
+        } finally {
+            await owner.stop();
+        }
+    });
+
+    test('keeps following while the matching owner remains healthy', async function () {
+        this.timeout(3000);
+        const owner = new WallpaperServer(createContext());
+        const follower = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = follower;
+        await owner.start(root, 0, 'index.html', root, true);
+
+        try {
+            await follower.start(root, owner.getCurrentInfo().port, 'index.html', root, true);
+            await new Promise(resolve => setTimeout(resolve, 120));
+
+            assert.strictEqual(owner.getCurrentInfo().ownership, 'local');
+            assert.strictEqual(follower.getCurrentInfo().ownership, 'external');
+            await owner.verifyHealth();
+            await follower.verifyHealth();
+        } finally {
+            await follower.stop();
+            await owner.stop();
+        }
+    });
+
+    test('stopped follower does not claim after the owner exits', async function () {
+        this.timeout(3000);
+        const owner = new WallpaperServer(createContext());
+        const follower = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = follower;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        await follower.start(root, port, 'index.html', root, true);
+        await follower.stop();
+        await owner.stop();
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        const probe = http.createServer();
+        try {
+            await new Promise<void>((resolve, reject) => {
+                probe.once('error', reject);
+                probe.listen(port, '127.0.0.1', resolve);
+            });
+        } finally {
+            await close(probe);
+        }
+        assert.strictEqual(follower.getCurrentInfo().ownership, 'none');
+    });
+
+    test('switching a follower to a new port invalidates the old takeover monitor', async function () {
+        this.timeout(4000);
+        const owner = new WallpaperServer(createContext());
+        const follower = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = follower;
+        await owner.start(root, 0, 'index.html', root, true);
+        const oldPort = owner.getCurrentInfo().port;
+        const newPortProbe = http.createServer();
+        const newPort = await listen(newPortProbe);
+        await close(newPortProbe);
+
+        try {
+            await follower.start(root, oldPort, 'index.html', root, true);
+            assert.strictEqual(follower.getCurrentInfo().ownership, 'external');
+
+            await follower.start(root, newPort, 'index.html', root, true);
+            assert.strictEqual(follower.getCurrentInfo().ownership, 'local');
+            assert.strictEqual(follower.getCurrentInfo().port, newPort);
+
+            await owner.stop();
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            const oldPortProbe = http.createServer();
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    oldPortProbe.once('error', reject);
+                    oldPortProbe.listen(oldPort, '127.0.0.1', resolve);
+                });
+            } finally {
+                await close(oldPortProbe);
+            }
+            await follower.verifyHealth();
+        } finally {
+            await follower.stop();
+            await owner.stop();
+        }
+    });
+
+    test('elects one owner when two followers race to take over', async function () {
+        this.timeout(4000);
+        const owner = new WallpaperServer(createContext());
+        const followerA = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        const followerB = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = followerA;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        try {
+            await followerA.start(root, port, 'index.html', root, true);
+            await followerB.start(root, port, 'index.html', root, true);
+            await owner.stop();
+            await waitForCondition(() => {
+                const roles = [followerA.getCurrentInfo().ownership, followerB.getCurrentInfo().ownership];
+                return roles.filter(role => role === 'local').length === 1
+                    && roles.filter(role => role === 'external').length === 1;
+            });
+
+            const roles = [followerA.getCurrentInfo().ownership, followerB.getCurrentInfo().ownership];
+            assert.strictEqual(roles.filter(role => role === 'local').length, 1);
+            assert.strictEqual(roles.filter(role => role === 'external').length, 1);
+            await followerA.verifyHealth();
+            await followerB.verifyHealth();
+        } finally {
+            const followers = [followerA, followerB];
+            for (const follower of followers.filter(item => item.getCurrentInfo().ownership === 'external')) {
+                await follower.stop();
+            }
+            for (const follower of followers.filter(item => item.getCurrentInfo().ownership === 'local')) {
+                await follower.stop();
+            }
+            await owner.stop();
+        }
+    });
+
+    test('stops following when the owner switches to a different wallpaper', async function () {
+        this.timeout(3000);
+        const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wallpaper-server-other-'));
+        fs.writeFileSync(path.join(otherRoot, 'index.html'), '<!doctype html><html><body>other</body></html>');
+        const owner = new WallpaperServer(createContext());
+        const follower = new WallpaperServer(createContext(), { takeoverPollIntervalMs: 20 });
+        server = follower;
+        await owner.start(root, 0, 'index.html', root, true);
+        const port = owner.getCurrentInfo().port;
+
+        try {
+            await follower.start(root, port, 'index.html', root, true);
+            await owner.start(otherRoot, port, 'index.html', otherRoot, true);
+            await waitForCondition(() => follower.getCurrentInfo().ownership === 'none');
+
+            assert.strictEqual(owner.getCurrentInfo().ownership, 'local');
+            await owner.verifyHealth(500, { rootPath: otherRoot, entryFile: 'index.html' });
+        } finally {
+            await follower.stop();
+            await owner.stop();
+            fs.rmSync(otherRoot, { recursive: true, force: true });
         }
     });
 

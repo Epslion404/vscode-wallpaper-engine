@@ -683,7 +683,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     validateMedia: input => validateWallpaperMedia(input.filePath),
                     startServer: async input => {
                         if (!server) { throw new Error('壁纸服务器未初始化'); }
-                        await server.start(input.dirPath, input.port, input.fileName, input.location, true);
+                        await server.start(input.dirPath, input.port, input.fileName, input.location, true, true);
                         syncServerCssConfig(config);
                     },
                     verifyHealth: async () => {
@@ -723,6 +723,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 config.serverPort,
                                 oldPlayback.entryFile,
                                 oldPlayback.location,
+                                true,
                                 true
                             );
                             syncServerCssConfig(config);

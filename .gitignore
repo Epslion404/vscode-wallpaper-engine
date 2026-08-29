@@ -5,6 +5,7 @@ node_modules
 *.vsix
 temp/
 .tmp-cdp-user-*/
+.tmp-playback-e2e-*/
 .github/prompts/
 .planning/
 
