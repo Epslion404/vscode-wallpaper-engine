@@ -27,7 +27,7 @@
 ### 前置要求
 
 1.  已安装 **Wallpaper Engine** (Steam 版本)。
-2.  使用 Scene 壁纸时，需要可用的 **FFmpeg**，且构建包含 `gdigrab` 和 `libvpx-vp9`；扩展会优先从 PATH 和常见目录自动检测。
+2.  使用 Scene 壁纸时，需要可用的 **FFmpeg**，且构建包含 `gdigrab` 和 `libx264`；扩展会优先从 PATH 和常见目录自动检测。
 3.  **权限说明**: 首次安装或更新注入时，插件会请求管理员权限 (Sudo) 以修改 VS Code 核心文件，请允许。
 
 ### 安装步骤
@@ -90,7 +90,7 @@
 
 - 壁纸路径、壁纸 ID、服务器端口、透明化开关、透明化规则和基底颜色会写入 VS Code 设置。
 - Wallpaper Settings 会优先使用当前打开资源的配置作用域（工作区文件夹 > 工作区 > 用户），因此请在目标工作区中打开面板并保存规则。
-- 修改壁纸相关配置后，扩展会尝试同步服务器和 Workbench 注入；涉及端口、壁纸或注入状态的变更通常需要重载窗口。
+- 修改壁纸相关配置后，扩展会同步服务器和 Workbench 注入。同一播放类型可热切换；Video、Image、Web 之间切换时会自动重载窗口，以执行对应的新运行时。
 
 ## 🎮 使用指南
 
@@ -111,11 +111,11 @@
 
 ### Scene 自动录制缓存
 
-- Scene 不能直接在浏览器中播放。扩展会让 Wallpaper Engine 在独立命名窗口中渲染，再通过 Windows Graphics Capture 录制临时视频，并由 FFmpeg 转成静音 VP9/WebM 缓存。
+- Scene 不能直接在浏览器中播放。扩展会让 Wallpaper Engine 在独立命名窗口中渲染，再通过 Windows Graphics Capture 录制临时视频，并由 FFmpeg 转成静音 H.264/MP4 缓存（`yuv420p`、faststart）。
 - 缓存保存在扩展的 `globalStorageUri/scene-cache` 中，不修改 Steam 工坊源文件，也不会写入 VSIX。
 - 首次选择 Scene 时输入录制时长；留空采用 30 秒。再次选择同一 Scene 时可复用缓存或重新录制。
 - 录制支持取消；失败或取消会清理专用窗口和临时文件，并保留上一次有效缓存与当前壁纸。
-- Scene 源文件、时长、分辨率或编码参数变化后，旧缓存会自动失效。
+- Scene 源文件、时长、分辨率或编码参数变化后，旧缓存会自动失效。`0.1.2` 早期开发版生成的 v1 VP8/VP9 WebM 缓存不会兼容读取，请重新选择 Scene 并执行“重新录制”。
 
 ### 还原修改并卸载
 
@@ -140,7 +140,7 @@
 ### Scene 无法录制？
 
 1. 在 `Wallpaper Engine` Output 中确认 Wallpaper Engine、FFmpeg 和原生捕获 helper 均已找到。
-2. FFmpeg 必须支持 `libvpx-vp9`；可执行 `ffmpeg -encoders` 检查。
+2. FFmpeg 必须支持 `libx264`；可执行 `ffmpeg -encoders` 检查。
 3. 若自动检测失败，在设置中填写 `wallpaperEnginePath` 和 `ffmpegPath`，或在提示中选择对应程序。
 4. 录制期间不要最小化或主动关闭 Wallpaper Engine 的专用弹出窗口。
 5. 重新选择该 Scene 并选择“重新录制”；旧缓存只有在新录制校验成功后才会被替换。
@@ -159,7 +159,7 @@
 
 ### 壁纸只在启动瞬间出现，随后变黑？
 
-当前修复同时处理三条链路：视频改用支持 Range 的本地 HTTP 媒体入口；壁纸容器使用非负层级并在被 Workbench 重建移除时恢复；现代布局基础表面 `surface.background` 纳入透明化。Workbench 注入协议升级到 `5`，升级后需要重新执行一次“设置壁纸”。若日志显示视频已 `time-progress` 但仍不可见，再检查 C/C++ Theme 等主题兼容设置。
+当前修复同时处理媒体格式、启动恢复、服务接管、模块缓存和界面遮挡：Scene 缓存使用 H.264/MP4；Video/Image 等待本地服务后再加载并执行有界重试；Reload Window 后新 Extension Host 会接管原端口；实际 `workbench.js` 入口使用扩展管理的查询参数绕过 Electron 模块缓存；现代布局基础表面 `surface.background` 纳入透明化。Workbench 注入协议已升级到 `6`，升级后需要重新执行一次“设置壁纸”。若日志显示视频已 `time-progress` 但仍不可见，再检查 C/C++ Theme 等主题兼容设置。
 
 ## 🛠️ 开发与发布
 

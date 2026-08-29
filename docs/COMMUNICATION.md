@@ -10,20 +10,20 @@
 2. **Workbench 注入脚本**：运行在 VS Code 主窗口，用于创建壁纸容器、同步透明化 CSS 和向壁纸 iframe 发送运行时消息。
 3. **本地壁纸服务器**：由 Extension Host 启动，默认只监听 `127.0.0.1:23333`，提供壁纸入口、项目配置和健康检查接口。
 4. **壁纸 iframe**：使用 `sandbox="allow-scripts"` 加载 Web 壁纸入口。未授予 `allow-same-origin`，因此壁纸脚本不能读取或修改 Workbench DOM，也不能直接访问扩展宿主。
-5. **Scene 捕获 helper**：仅在录制原生 Scene 时启动，使用 Windows Graphics Capture 捕获指定的 Wallpaper Engine 命名窗口；完成后由 FFmpeg 转为 VP9/WebM，helper 不接触 Workbench 或本地 HTTP 服务。
+5. **Scene 捕获 helper**：仅在录制原生 Scene 时启动，使用 Windows Graphics Capture 捕获指定的 Wallpaper Engine 命名窗口；完成后由 FFmpeg 转为 H.264/MP4，helper 不接触 Workbench 或本地 HTTP 服务。
 
-Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`、`connect-src` 和 `media-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入脚本通过基础 CSS 和节流的 DOM 观察持续覆盖 modern UI shell 的背景变量及 `.monaco-grid-view`，主题兼容模式只负责额外的 C/C++ Theme 适配。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
+Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`、`connect-src`、`media-src` 和 `img-src` 增加当前端口的 `http://127.0.0.1:<port>`，不会恢复旧版的全开放 CSP。注入脚本通过基础 CSS 和节流的 DOM 观察持续覆盖 modern UI shell 的背景变量及 `.monaco-grid-view`，主题兼容模式只负责额外的 C/C++ Theme 适配。注入代码带有协议版本标记，升级或还原时可识别并清理旧注入。
 
 ## 2. 初始化与壁纸加载
 
 1. 扩展激活后读取配置，并按需要启动本地服务器。
 2. 设置壁纸命令扫描创意工坊目录中的 `project.json`。`video`、`image`、`web` 和 `scene` 均进入候选列表，标题和工坊 ID 都可搜索。
 3. 选择 Scene 后，扩展检查 `globalStorageUri/scene-cache`：已有有效缓存可直接复用或重新录制；无缓存时输入 1–300 秒，留空默认 30 秒。
-4. 录制时 Wallpaper Engine 通过 `openWallpaper` 在唯一命名窗口中渲染；原生 helper 捕获该窗口，FFmpeg 转为静音 VP9/WebM 并执行视频流、时长、尺寸和黑帧验证。成功后原子提交缓存，失败或取消保留旧缓存。
+4. 录制时 Wallpaper Engine 通过 `openWallpaper` 在唯一命名窗口中渲染；原生 helper 捕获该窗口，FFmpeg 转为静音 H.264/MP4（`yuv420p`、faststart）并执行视频流、时长、尺寸和黑帧验证。成功后原子提交 v2 缓存，失败或取消保留旧缓存；v1 VP8/VP9 WebM 不再兼容读取。
 5. Scene 缓存随后按普通 Video 进入既有设置事务。服务器依次验证媒体、服务健康状态和 `/api/get-entry` 入口。
-6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 `workbench.desktop.main.js`，最后请求窗口重载。
+6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 HTML 实际引用的 `electron-browser` 或 `electron-sandbox` `workbench.js`；旧布局才回退到 `workbench.desktop.main.js`。模块 URL 写入 `vscode-wallpaper` cache-bust 参数后请求窗口重载。
 7. 注入脚本创建 `#vscode-wallpaper-container`。壁纸层使用 `z-index: 0`，Workbench 根层使用独立的 `z-index: 1` stacking context；容器被后加载布局移除时只执行有界、幂等恢复。
-8. 视频、Scene 缓存和图片壁纸通过固定的 `/media/current` 加载；Web 壁纸通过本地服务的 `/api/get-entry` 加载。
+8. 视频、Scene 缓存和图片壁纸通过固定的 `/media/current` 加载；Video/Image 在 `/ping` 成功前不挂载媒体源，失败时最多进行三次有界启动尝试。Web 壁纸通过本地服务的 `/api/get-entry` 加载。
 9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频只有在 `playing` 后 `currentTime` 确实推进才进入 ready；重载后的 Extension Host 通过 `/playback-status` 确认后才报告成功。
 
 ## 3. 本地 HTTP 接口
@@ -33,7 +33,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 | 接口 | 用途 |
 | --- | --- |
 | `GET /ping` | 健康检查。普通请求返回 `200 pong`；切换壁纸时可返回一次 `205`，通知客户端重新加载 iframe。 |
-| `GET /status` | 返回服务是否运行、当前壁纸根目录和入口文件，用于端口复用检查。 |
+| `GET /status` | 返回服务身份、协议版本、实例 ID、当前壁纸根目录和入口文件，用于 owner/follower 跟随与端口接管。 |
 | `GET /config` | 返回当前 CSS 配置（例如 `customCss`、`themeCompatibility`），供注入脚本同步样式。 |
 | `GET /api/get-entry` | 返回视频、图片或 Web 壁纸的可加载入口 HTML。 |
 | `GET/HEAD /media/current` | 只读取服务端当前播放条目；支持单 Range、`200/206/416`、正确 MIME 和长度，不接受路径参数。 |
@@ -41,7 +41,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 | `GET /playback-status` | 返回最新播放快照或 `idle`，供重载后的 Extension Host 确认真实播放状态。 |
 | `GET /project.json` | 合并当前壁纸及依赖目录的项目属性，供壁纸属性面板使用。 |
 | `GET /proxy?url=...` | 为壁纸兼容层代理公开网络资源。只接受 `http`/`https`，拒绝私网或回环地址、DNS 解析到私网的目标和重定向；单请求超时 10 秒，响应上限 10 MiB。 |
-| `GET /shutdown` | 本地服务接管时使用的关闭信号，不应由壁纸页面主动调用。 |
+| `POST /shutdown` | 仅显式壁纸 handoff 使用；要求当前 owner lease，不提供 CORS，拒绝 `OPTIONS` 和过期租约。 |
 
 文件请求会经过真实路径校验，只允许落在当前壁纸目录或已解析的依赖目录内；路径穿越、符号链接越界和目录外文件不会被返回。
 
@@ -75,9 +75,11 @@ Host 会校验枚举值并写入用户级设置。透明化规则、开关和基
 
 ## 6. 刷新、重载与还原
 
-- 修改壁纸或服务器端口时，扩展会保存待确认事务，并在注入完成后请求 `workbench.action.reloadWindow`。
+- 正式“设置壁纸”事务会保存待确认状态，并在注入完成后请求 `workbench.action.reloadWindow`。直接修改配置时，同播放类型走热切换；Video、Image、Web 类型变化会自动重载。
 - 重载后的激活流程会验证注入标记、服务健康、壁纸入口和真实媒体 ready；任一项失败都会保留错误状态，便于查看 `Wallpaper Engine` Output 日志。
 - Reload Window 关闭旧 Extension Host 时产生的精确取消错误属于正常事务移交，不触发配置回滚或虚假失败提示。
+- 旧 Extension Host 的服务仍健康时，新宿主作为 follower；旧 owner 退出后 follower 在原端口竞争接管，generation 与 AbortSignal 会使旧探测、监听和关闭回调失效。
+- 每次注入都会更新 Workbench 模块入口的 cache-bust 参数，因此 Reload Window 不需要退出整个 Code 主进程也能执行最新协议代码。
 - Scene 会持久化实际缓存视频的根目录、入口和 `Video` 播放类型；重载恢复、配置重应用和失败回滚不会把原始 `scene.pkg` 直接送入 Workbench。
 - 执行“还原壁纸修改”时，扩展会停止服务、移除 Workbench 注入、恢复 CSP、删除插件托管的透明化备份和持久化状态，再通过重载后的验证确认清理完成。
 - VS Code 更新可能覆盖 Workbench 文件。此时需要重新执行“设置壁纸”；若不再使用扩展，应先执行还原命令并等待验证通过，再卸载扩展。

@@ -8,7 +8,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Added
 
-- 原生 Scene 壁纸可通过 Wallpaper Engine 命名窗口自动录制为静音 VP9/WebM 缓存；录制时长默认 30 秒，可设置为 1–300 秒。
+- 原生 Scene 壁纸可通过 Wallpaper Engine 命名窗口自动录制为静音 H.264/MP4 缓存；录制时长默认 30 秒，可设置为 1–300 秒。
 - 已有 Scene 缓存支持直接复用或重新录制；录制支持进度、取消、失败清理和旧缓存保护。
 - 新增 Windows Graphics Capture helper，解决硬件加速 Scene 使用 GDI 捕获时全黑的问题。
 - 新增 Wallpaper Engine 与 FFmpeg 自动探测及自定义路径设置。
@@ -21,6 +21,13 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - 壁纸容器改用非负 stacking context，并在 Workbench 布局重建时执行有界、幂等恢复，避免完整 UI 加载后落到窗口黑色背景之后。
 - 新增 `surface.background` 现代 UI 基础表面透明化规则，并保留用户原颜色的托管备份与恢复行为。
 - Reload Window 正常终止旧 Extension Host 时产生的精确取消错误不再触发回滚或虚假失败通知。
+- Scene 缓存清单升级到 v2，统一使用 `libx264`、`yuv420p` 和 MP4 faststart；旧 v1 VP8/VP9 WebM 缓存直接失效并要求重新录制。
+- Video/Image 媒体源只在本地服务就绪后挂载，并以三次有界尝试处理首次加载失败；最终失败会保留明确的播放诊断。
+- Workbench CSP 为 Image 的当前回环媒体入口增加受限 `img-src`，不开放任意来源。
+- Reload Window 后新 Extension Host 会健康跟随并接管旧宿主释放的端口；多窗口竞争只产生一个服务 owner。
+- 注入器优先修改 Workbench HTML 实际引用的 `electron-browser` / `electron-sandbox` `workbench.js`，并清理历史错误候选中的旧注入。
+- Workbench 模块入口增加扩展管理的 cache-bust 参数，使同一 Code 主进程内 Reload Window 执行最新注入脚本。
+- Video、Image、Web 播放类型之间切换时自动 Reload Window；同类型壁纸仍使用轻量热切换。
 
 ## [0.1.2] - 2026-08-28
 
