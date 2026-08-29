@@ -161,7 +161,7 @@
 
 ### 壁纸只在启动瞬间出现，随后变黑？
 
-当前修复同时处理媒体格式、启动恢复、服务接管、模块缓存和界面遮挡：Scene 缓存使用 H.264/MP4；Video/Image 等待本地服务后再加载并执行有界重试；Reload Window 后新 Extension Host 会接管原端口；实际 `workbench.js` 入口使用扩展管理的查询参数绕过 Electron 模块缓存；现代布局基础表面 `surface.background` 纳入透明化。Workbench 注入协议已升级到 `6`，升级后需要重新执行一次“设置壁纸”。若日志显示视频已 `time-progress` 但仍不可见，再检查 C/C++ Theme 等主题兼容设置。
+当前修复同时处理媒体格式、启动恢复、服务接管、模块缓存和界面遮挡：Scene 缓存使用 H.264/MP4；Video/Image 等待本地服务后再加载并执行有界重试；Chromium 因页面隐藏暂停纯视频时保留媒体源，并在窗口恢复可见后继续播放；Reload Window 后新 Extension Host 会接管原端口；实际 `workbench.js` 入口使用扩展管理的查询参数绕过 Electron 模块缓存；现代布局基础表面 `surface.background` 纳入透明化。Workbench 注入协议已升级到 `7`，升级后需要重新执行一次“设置壁纸”。若日志显示视频已 `time-progress` 但仍不可见，再检查 C/C++ Theme 等主题兼容设置。
 
 ## 🛠️ 开发与发布
 

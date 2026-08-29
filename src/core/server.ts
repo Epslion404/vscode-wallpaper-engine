@@ -1563,7 +1563,15 @@ ${baseTag}
                 if (status.state !== 'idle'
                     && status.mediaType === expectedMediaType
                     && status.updatedAt >= minimumUpdatedAt) {
-                    if (status.state === 'ready') {
+                    const visibilityDeferred = status.state === 'loading'
+                        && status.mediaType === 'video'
+                        && status.event === 'visibility-deferred'
+                        && status.paused === true;
+                    if (status.state === 'ready' || visibilityDeferred) {
+                        if (visibilityDeferred) {
+                            console.log('[Playback] video 因页面隐藏暂缓播放，保留媒体等待可见后恢复');
+                            return;
+                        }
                         console.log(`[Playback] ${expectedMediaType} 已确认播放就绪`);
                         return;
                     }

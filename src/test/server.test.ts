@@ -692,6 +692,52 @@ suite('WallpaperServer lifecycle and preflight', () => {
         }
     });
 
+    test('verifyPlaybackReady accepts a current video visibility deferral', async () => {
+        const confirmationCreatedAt = Date.now();
+        const externalOwner = createExternalPlaybackOwner(root, () => ({
+            state: 'loading',
+            mediaType: 'video',
+            event: 'visibility-deferred',
+            paused: true,
+            updatedAt: confirmationCreatedAt
+        }));
+        const port = await listen(externalOwner.owner);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await server.verifyPlaybackReady('video', 1000, confirmationCreatedAt);
+            assert.strictEqual(externalOwner.getPlaybackRequestCount(), 1);
+        } finally {
+            await server.stop();
+            await close(externalOwner.owner);
+        }
+    });
+
+    test('verifyPlaybackReady rejects visibility deferral without an actual paused video', async () => {
+        const confirmationCreatedAt = Date.now();
+        const externalOwner = createExternalPlaybackOwner(root, () => ({
+            state: 'loading',
+            mediaType: 'video',
+            event: 'visibility-deferred',
+            paused: false,
+            updatedAt: confirmationCreatedAt
+        }));
+        const port = await listen(externalOwner.owner);
+        server = new WallpaperServer(createContext());
+
+        try {
+            await server.start(root, port, 'index.html', root, true);
+            await assert.rejects(
+                server.verifyPlaybackReady('video', 30, confirmationCreatedAt),
+                /等待 video 播放就绪超时/
+            );
+        } finally {
+            await server.stop();
+            await close(externalOwner.owner);
+        }
+    });
+
     test('verifyPlaybackReady does not accept ready snapshots older than the confirmation', async () => {
         const confirmationCreatedAt = Date.now();
         const externalOwner = createExternalPlaybackOwner(root, () => ({

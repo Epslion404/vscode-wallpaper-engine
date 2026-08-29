@@ -24,7 +24,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 HTML 实际引用的 `electron-browser` 或 `electron-sandbox` `workbench.js`；旧布局才回退到 `workbench.desktop.main.js`。模块 URL 写入 `vscode-wallpaper` cache-bust 参数后请求窗口重载。
 7. 注入脚本创建 `#vscode-wallpaper-container`。壁纸层使用 `z-index: 0`，Workbench 根层使用独立的 `z-index: 1` stacking context；容器被后加载布局移除时只执行有界、幂等恢复。
 8. 视频、Scene 缓存和图片壁纸通过固定的 `/media/current` 加载；Video/Image 在 `/ping` 成功前不挂载媒体源，失败时最多进行三次有界启动尝试。Web 壁纸通过本地服务的 `/api/get-entry` 加载。
-9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频只有在 `playing` 后 `currentTime` 确实推进才进入 ready；重载后的 Extension Host 通过 `/playback-status` 确认，并忽略早于本次待确认事务的陈旧快照后才报告成功。
+9. Workbench 将有界的加载、播放和错误状态提交到 `/playback-event`。视频通常只有在 `playing` 后 `currentTime` 确实推进才进入 ready；若 Chromium 因页面隐藏暂停无音轨视频，则上报 `visibility-deferred`，保留媒体源并在页面恢复可见后继续播放。重载后的 Extension Host 通过 `/playback-status` 确认，并忽略早于本次待确认事务的陈旧快照后才报告成功。
 
 ## 3. 本地 HTTP 接口
 

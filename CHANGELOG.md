@@ -6,6 +6,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-29
+
 ### Added
 
 - Scene 录制在 Windows Graphics Capture helper 可用时默认使用非激活离屏窗口；静默捕获不可用时自动清理并仅回退一次到可见非激活模式。
@@ -13,6 +15,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ### Changed
 
 - FFmpeg `gdigrab` 兼容路径不再激活 Wallpaper Engine 窗口，并明确保持可见录制以避免离屏 GDI 捕获失败。
+
+### Fixed
+
+- Chromium 因页面隐藏而暂停无音轨视频时，不再消耗三次通用重试并清空媒体源；扩展保留媒体等待 Workbench 恢复可见后继续播放。
+- 播放确认接受本次事务的 `visibility-deferred` 条件状态，同时继续将真实的 `retry-exhausted` 视为终止错误。
+- Workbench 注入协议升级到 `7`，确保已安装旧注入的用户应用新的可见性恢复逻辑。
 
 ## [0.2.0] - 2026-08-29
 

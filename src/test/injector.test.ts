@@ -8,6 +8,7 @@ import {
     getWorkbenchPathCandidates,
     getWorkbenchTransparencyCss,
     hasCurrentInjection,
+    isBackgroundVideoPowerPause,
     patchWorkbenchScriptVersion,
     patchWorkbenchCspContent,
     runInjectionStep,
@@ -20,6 +21,24 @@ import {
 
 suite('Injector security boundary', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'core', 'injector.ts'), 'utf-8');
+
+    test('recognizes only the Chromium background video power pause AbortError', () => {
+        const powerPause = new Error(
+            'The play() request was interrupted because video-only background media was paused to save power.'
+        );
+        powerPause.name = 'AbortError';
+        const unrelatedAbort = new Error('The play() request was interrupted by a call to pause().');
+        unrelatedAbort.name = 'AbortError';
+
+        assert.strictEqual(isBackgroundVideoPowerPause(powerPause), true);
+        assert.strictEqual(isBackgroundVideoPowerPause({
+            name: 'AbortError',
+            message: powerPause.message
+        }), true);
+        assert.strictEqual(isBackgroundVideoPowerPause(unrelatedAbort), false);
+        assert.strictEqual(isBackgroundVideoPowerPause(new Error(powerPause.message)), false);
+        assert.strictEqual(isBackgroundVideoPowerPause('AbortError'), false);
+    });
 
     test('wallpaper iframe sandbox excludes same-origin access', () => {
         assert.match(source, /setAttribute\('sandbox',\s*'\$\{getWallpaperIframeSandbox\(\)\}'\)/);
@@ -157,8 +176,19 @@ suite('Injector security boundary', () => {
         assert.match(videoBranch, /muted = true/);
         assert.match(videoBranch, /playsInline = true/);
         assert.match(videoBranch, /\.load\(\)/);
-        assert.match(videoBranch, /return el\.play\(\)/);
+        assert.match(videoBranch, /return startVideoPlayback\(token\)/);
         assert.match(videoBranch, /mediaStartupController\.failed\(token,/);
+        assert.match(videoBranch, /'loading', 'visibility-deferred'/);
+        assert.match(videoBranch, /document\.addEventListener\('visibilitychange'/);
+        assert.match(videoBranch, /document\.visibilityState === 'visible'/);
+        assert.match(videoBranch, /deferredVideoToken = token/);
+        assert.match(videoBranch, /isBackgroundVideoPowerPause\(error\)/);
+        assert.match(videoBranch, /visibilityResumeRetryUsed/);
+        assert.match(videoBranch, /const isActiveVideoToken = token =>/);
+        assert.match(videoBranch, /if \(!isActiveVideoToken\(token\)\) return/);
+        assert.match(videoBranch, /activeVideoToken = token/);
+        assert.match(videoBranch, /const verifyVideoProgress = token =>/);
+        assert.match(videoBranch, /if \(!el\.paused\) \{[\s\S]*verifyVideoProgress\(token\)/);
     });
 
     test('video and image defer media source attachment to the bounded startup controller', () => {
@@ -216,7 +246,7 @@ suite('Injector security boundary', () => {
 
     test('runtime layering and cleanup are stable across reinjection and removal', () => {
         assert.match(source, /container\.style\.zIndex = '0'/);
-        assert.match(source, /__vscodeWallpaperRuntimeV6/);
+        assert.match(source, /__vscodeWallpaperRuntimeV7/);
         assert.match(source, /previousRuntime\.cleanup\(\)/);
         assert.match(source, /let container;/);
         assert.match(source, /if \(disposed\) return/);
@@ -259,6 +289,10 @@ suite('Injector security boundary', () => {
         );
         assert.strictEqual(
             hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:6] */'),
+            false,
+        );
+        assert.strictEqual(
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:7] */'),
             true,
         );
     });

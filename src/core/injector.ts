@@ -11,7 +11,7 @@ import { createMediaStartupController } from './media-startup';
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
-const JS_INJECTION_VERSION = '6';
+const JS_INJECTION_VERSION = '7';
 const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
@@ -28,6 +28,17 @@ const WORKBENCH_SCRIPT_VERSION_PARAM = 'vscode-wallpaper';
 const WORKBENCH_SCRIPT_SRC_PATTERN = /(\bsrc\s*=\s*["'])(\.\/workbench\.js(?:\?[^"']*)?)(["'])/i;
 
 export type InjectionStage = 'html' | 'javascript' | 'reload';
+
+/** 只识别 Chromium 页面隐藏节能策略产生的专用 AbortError。 */
+export function isBackgroundVideoPowerPause(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null) {
+        return false;
+    }
+    const candidate = error as { name?: unknown; message?: unknown };
+    return candidate.name === 'AbortError'
+        && typeof candidate.message === 'string'
+        && candidate.message.includes('video-only background media was paused to save power');
+}
 
 /** 注入流程中的可分类错误；cause 保留底层 I/O 或命令异常。 */
 export class WorkbenchInjectionError extends Error {
@@ -370,13 +381,26 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
             let mediaStartupStarted = false;
             let progressTimer = 0;
             let playbackWatchdog = 0;
+            let visibilityResumeTimer = 0;
+            let deferredVideoToken;
+            let activeVideoToken;
+            let visibilityResumeRetryUsed = false;
             let attemptCleanupTasks = [];
+
+            const isActiveVideoToken = token => activeVideoToken !== undefined
+                && token.generation === activeVideoToken.generation
+                && token.attempt === activeVideoToken.attempt;
 
             const clearAttemptRuntime = () => {
                 window.clearTimeout(progressTimer);
                 window.clearTimeout(playbackWatchdog);
+                window.clearTimeout(visibilityResumeTimer);
                 progressTimer = 0;
                 playbackWatchdog = 0;
+                visibilityResumeTimer = 0;
+                deferredVideoToken = undefined;
+                activeVideoToken = undefined;
+                visibilityResumeRetryUsed = false;
                 while (attemptCleanupTasks.length > 0) {
                     attemptCleanupTasks.pop()();
                 }
@@ -394,18 +418,21 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
                 'loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing',
                 'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended'
             ];
+            const verifyVideoProgress = token => {
+                const startedAt = el.currentTime;
+                window.clearTimeout(progressTimer);
+                progressTimer = window.setTimeout(() => {
+                    if (!el.paused && el.currentTime > startedAt + 0.05) {
+                        mediaStartupController.ready(token);
+                    }
+                }, 750);
+            };
             const installVideoAttempt = token => {
                 videoEvents.forEach(eventName => {
                     const handler = () => {
                         reportPlayback('loading', eventName, mediaSnapshot(el));
                         if (eventName !== 'playing') return;
-                        const startedAt = el.currentTime;
-                        window.clearTimeout(progressTimer);
-                        progressTimer = window.setTimeout(() => {
-                            if (!el.paused && el.currentTime > startedAt + 0.05) {
-                                mediaStartupController.ready(token);
-                            }
-                        }, 750);
+                        verifyVideoProgress(token);
                     };
                     el.addEventListener(eventName, handler);
                     attemptCleanupTasks.push(() => el.removeEventListener(eventName, handler));
@@ -422,10 +449,67 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
                 el.addEventListener('error', errorHandler);
                 attemptCleanupTasks.push(() => el.removeEventListener('error', errorHandler));
             };
+            const deferVideoForVisibility = (token, error) => {
+                if (!isActiveVideoToken(token)) return;
+                window.clearTimeout(playbackWatchdog);
+                playbackWatchdog = 0;
+                deferredVideoToken = token;
+                reportPlayback('loading', 'visibility-deferred', {
+                    ...mediaSnapshot(el),
+                    detail: error.message
+                });
+                if (document.visibilityState === 'visible' && !visibilityResumeRetryUsed) {
+                    visibilityResumeRetryUsed = true;
+                    window.clearTimeout(visibilityResumeTimer);
+                    visibilityResumeTimer = window.setTimeout(resumeDeferredVideo, 100);
+                }
+            };
+            const startVideoPlayback = token => {
+                window.clearTimeout(playbackWatchdog);
+                playbackWatchdog = window.setTimeout(() => {
+                    mediaStartupController.failed(token, 'watchdog-timeout');
+                }, 2500);
+                return Promise.resolve()
+                    .then(() => el.play())
+                    .catch(error => {
+                        if (isBackgroundVideoPowerPause(error)) {
+                            if (isActiveVideoToken(token)) {
+                                deferVideoForVisibility(token, error);
+                            }
+                            return;
+                        }
+                        throw error;
+                    });
+            };
+            const resumeDeferredVideo = () => {
+                const token = deferredVideoToken;
+                if (!token || !isActiveVideoToken(token)
+                    || document.visibilityState !== 'visible') return;
+                deferredVideoToken = undefined;
+                window.clearTimeout(visibilityResumeTimer);
+                visibilityResumeTimer = 0;
+                if (!el.paused) {
+                    // Chromium 可能已在 visibilitychange 前自动恢复；仍验证真实时间轴推进。
+                    verifyVideoProgress(token);
+                    return;
+                }
+                startVideoPlayback(token).catch(error => {
+                    const detail = error instanceof Error ? error.message : String(error);
+                    mediaStartupController.failed(token, 'attach-rejected: ' + detail);
+                });
+            };
+            const handleVideoVisibilityChange = () => {
+                if (document.visibilityState === 'visible') resumeDeferredVideo();
+            };
+            document.addEventListener('visibilitychange', handleVideoVisibilityChange);
+            cleanupTasks.push(() => {
+                document.removeEventListener('visibilitychange', handleVideoVisibilityChange);
+            });
 
             mediaStartupController = createMediaStartupController({
                 attachSource: token => {
                     clearAttemptRuntime();
+                    activeVideoToken = token;
                     clearVideoSource();
                     playbackReady = false;
                     installVideoAttempt(token);
@@ -433,10 +517,7 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
                         + token.generation + '&attempt=' + token.attempt;
                     el.src = mediaUrl;
                     el.load();
-                    playbackWatchdog = window.setTimeout(() => {
-                        mediaStartupController.failed(token, 'watchdog-timeout');
-                    }, 2500);
-                    return el.play();
+                    return startVideoPlayback(token);
                 },
                 schedule: (delayMs, callback) => {
                     const timer = window.setTimeout(callback, delayMs);
@@ -656,13 +737,15 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
         : type === WallpaperType.Image ? 'image' : 'web';
     // 将通过单元测试的纯控制器原样嵌入 Workbench，避免生产注入与测试实现分叉。
     const mediaStartupControllerSource = createMediaStartupController.toString();
+    const backgroundVideoPowerPauseSource = isBackgroundVideoPowerPause.toString();
     const jsInjection = `
 /* [VSCode-Wallpaper-Injection-Start] */
 ${JS_INJECTION_VERSION_MARKER}
 (function() {
     try {
-        const runtimeKey = '__vscodeWallpaperRuntimeV6';
+        const runtimeKey = '__vscodeWallpaperRuntimeV7';
         const createMediaStartupController = ${mediaStartupControllerSource};
+        const isBackgroundVideoPowerPause = ${backgroundVideoPowerPauseSource};
         let container;
         const previousRuntime = window[runtimeKey];
         if (previousRuntime && typeof previousRuntime.cleanup === 'function') {
@@ -714,7 +797,8 @@ ${JS_INJECTION_VERSION_MARKER}
             const now = Date.now();
             const eventKey = state + ':' + event;
             if ((lastPlaybackEvents.get(eventKey) || 0) + 1000 > now) return;
-            if (state === 'loading' && lastPlaybackReportAt + 150 > now) return;
+            if (state === 'loading' && event !== 'visibility-deferred'
+                && lastPlaybackReportAt + 150 > now) return;
             lastPlaybackEvents.set(eventKey, now);
             lastPlaybackReportAt = now;
             const detail = !fields || fields.detail === undefined
