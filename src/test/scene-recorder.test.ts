@@ -5,6 +5,7 @@ import {
     buildFfmpegTranscodeArgs,
     buildOpenWallpaperArgs,
     createSceneWindowName,
+    getSceneRecordingModes,
     runSceneProcess,
     SceneRecordingError
 } from '../core/scene-recorder';
@@ -24,7 +25,7 @@ suite('Scene Recorder Test Suite', () => {
         codec: 'libx264'
     };
 
-    test('builds a unique named Wallpaper Engine window command', () => {
+    test('builds a silent off-screen Wallpaper Engine window without activation', () => {
         const windowName = createSceneWindowName(source.wallpaperId, 'operation-1');
         const args = buildOpenWallpaperArgs(source, profile, windowName);
 
@@ -37,6 +38,28 @@ suite('Scene Recorder Test Suite', () => {
         assert.deepStrictEqual(buildCloseWallpaperArgs(windowName), [
             '-control', 'closeWallpaper', '-location', windowName
         ]);
+        assert.deepStrictEqual(args.slice(args.indexOf('-width'), args.indexOf('-width') + 4), [
+            '-width', '1920', '-height', '1080'
+        ]);
+        assert.deepStrictEqual(args.slice(args.indexOf('-x'), args.indexOf('-x') + 4), [
+            '-x', '-32000', '-y', '-32000'
+        ]);
+        assert.ok(args.includes('-borderless'));
+        assert.ok(!args.includes('-activate'));
+    });
+
+    test('builds a visible compatibility window without activation or off-screen coordinates', () => {
+        const args = buildOpenWallpaperArgs(source, profile, 'capture-window', 'visible');
+
+        assert.ok(args.includes('-borderless'));
+        assert.ok(!args.includes('-activate'));
+        assert.ok(!args.includes('-x'));
+        assert.ok(!args.includes('-y'));
+    });
+
+    test('attempts silent recording only when the WGC helper is available', () => {
+        assert.deepStrictEqual(getSceneRecordingModes(true), ['silent', 'visible']);
+        assert.deepStrictEqual(getSceneRecordingModes(false), ['visible']);
     });
 
     test('builds gdigrab H.264 MP4 recording arguments without a shell string', () => {

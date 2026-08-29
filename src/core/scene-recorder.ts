@@ -14,6 +14,9 @@ import { runSceneProcess, SceneRecordingError } from './scene-process';
 const WINDOW_READY_TIMEOUT_MS = 15_000;
 const WINDOW_POLL_INTERVAL_MS = 500;
 const WINDOW_WARMUP_MS = 1_500;
+const SILENT_WINDOW_COORDINATE = -32_000;
+
+export type SceneWindowMode = 'silent' | 'visible';
 
 export type SceneRecordingStage = 'launch' | 'waitWindow' | 'record' | 'validate' | 'cleanup';
 
@@ -50,17 +53,30 @@ export function createSceneWindowName(wallpaperId: string, operationId: string):
 export function buildOpenWallpaperArgs(
     source: SceneSource,
     profile: SceneRecordingProfile,
-    windowName: string
+    windowName: string,
+    mode: SceneWindowMode = 'silent'
 ): string[] {
-    return [
+    const args = [
         '-control', 'openWallpaper',
         '-file', source.projectJsonPath,
         '-playInWindow', windowName,
         '-width', String(profile.width),
         '-height', String(profile.height),
-        '-activate',
-        '-borderless'
     ];
+    if (mode === 'silent') {
+        // 保持窗口非最小化并移出常规虚拟桌面，WGC 仍可按窗口捕获合成表面。
+        args.push(
+            '-x', String(SILENT_WINDOW_COORDINATE),
+            '-y', String(SILENT_WINDOW_COORDINATE)
+        );
+    }
+    args.push('-borderless');
+    return args;
+}
+
+export function getSceneRecordingModes(helperAvailable: boolean): readonly SceneWindowMode[] {
+    // gdigrab 对离屏窗口兼容性不稳定，仅 WGC helper 尝试静默录制。
+    return helperAvailable ? ['silent', 'visible'] : ['visible'];
 }
 
 export function buildCloseWallpaperArgs(windowName: string): string[] {
@@ -239,42 +255,49 @@ async function validateRecording(
     }
 }
 
-export async function recordSceneToCache(options: RecordSceneOptions): Promise<SceneCacheEntry> {
-    const target = await createSceneCacheTarget(
-        options.cacheRoot,
-        options.source,
-        options.profile,
-        options.operationId
-    );
-    const windowName = createSceneWindowName(options.source.wallpaperId, options.operationId);
-    const intermediateCapturePath = path.join(target.cacheDir, `.${target.cacheKey}-${options.operationId}.capture.mp4`);
+interface SceneRecordingAttemptOptions {
+    mode: SceneWindowMode;
+    helperAvailable: boolean;
+    targetVideoPath: string;
+    intermediateCapturePath: string;
+    windowName: string;
+    report(progress: SceneRecordingProgress): void;
+    options: RecordSceneOptions;
+}
+
+async function recordSceneAttempt(attempt: SceneRecordingAttemptOptions): Promise<void> {
+    const { options } = attempt;
+    const modeLabel = attempt.mode === 'silent' ? '静默' : '兼容';
     let elapsedTimer: NodeJS.Timeout | undefined;
-    const startedAt = Date.now();
-    const report = (progress: SceneRecordingProgress): void => {
-        options.report?.(progress);
-        options.logger.info(progress.message);
-    };
 
     try {
-        report({ stage: 'launch', message: '正在启动 Wallpaper Engine Scene 渲染窗口…' });
-        await closeWallpaperWindow(options.executables.wallpaperEnginePath, windowName).catch(() => undefined);
+        attempt.report({
+            stage: 'launch',
+            message: `正在启动 Wallpaper Engine Scene ${modeLabel}录制窗口…`
+        });
+        await closeWallpaperWindow(options.executables.wallpaperEnginePath, attempt.windowName)
+            .catch(() => undefined);
+        await Promise.all([
+            fs.rm(attempt.targetVideoPath, { force: true }),
+            fs.rm(attempt.intermediateCapturePath, { force: true })
+        ]);
         await sendWallpaperControl(
             options.executables.wallpaperEnginePath,
-            buildOpenWallpaperArgs(options.source, options.profile, windowName),
+            buildOpenWallpaperArgs(options.source, options.profile, attempt.windowName, attempt.mode),
             options.signal
         );
 
-        report({ stage: 'waitWindow', message: '正在等待 Scene 渲染窗口…' });
+        attempt.report({ stage: 'waitWindow', message: `正在等待 Scene ${modeLabel}录制窗口…` });
         await waitForCaptureWindow(
             options.executables.ffmpegPath,
-            windowName,
+            attempt.windowName,
             options.signal,
             options.logger
         );
 
-        report({
+        attempt.report({
             stage: 'record',
-            message: `正在录制 0/${options.profile.durationSeconds} 秒…`,
+            message: `正在${modeLabel}录制 0/${options.profile.durationSeconds} 秒…`,
             elapsedSeconds: 0,
             totalSeconds: options.profile.durationSeconds
         });
@@ -286,32 +309,35 @@ export async function recordSceneToCache(options: RecordSceneOptions): Promise<S
             );
             options.report?.({
                 stage: 'record',
-                message: `正在录制 ${elapsedSeconds}/${options.profile.durationSeconds} 秒…`,
+                message: `正在${modeLabel}录制 ${elapsedSeconds}/${options.profile.durationSeconds} 秒…`,
                 elapsedSeconds,
                 totalSeconds: options.profile.durationSeconds
             });
         }, 1000);
 
-        const helperAvailable = await isFile(options.captureHelperPath);
-        const recordingResult = helperAvailable
+        const recordingResult = attempt.helperAvailable
             ? await runSceneProcess(options.captureHelperPath, [
-                windowName,
+                attempt.windowName,
                 String(options.profile.durationSeconds * 1000),
-                intermediateCapturePath
+                attempt.intermediateCapturePath
             ], {
                 signal: options.signal,
                 timeoutMs: (options.profile.durationSeconds + 15) * 1000
             })
             : await runSceneProcess(
                 options.executables.ffmpegPath,
-                buildFfmpegRecordingArgs(options.profile, windowName, target.temporaryVideoPath),
+                buildFfmpegRecordingArgs(
+                    options.profile,
+                    attempt.windowName,
+                    attempt.targetVideoPath
+                ),
                 {
                     signal: options.signal,
                     timeoutMs: (options.profile.durationSeconds + 15) * 1000
                 }
             );
         if (recordingResult.exitCode !== 0) {
-            const captureTool = helperAvailable ? 'Scene 捕获 helper' : 'FFmpeg';
+            const captureTool = attempt.helperAvailable ? 'Scene 捕获 helper' : 'FFmpeg';
             throw new SceneRecordingError(
                 'capture',
                 recordingResult.stderr.trim() || `${captureTool} 退出码 ${recordingResult.exitCode}`
@@ -322,15 +348,18 @@ export async function recordSceneToCache(options: RecordSceneOptions): Promise<S
             elapsedTimer = undefined;
         }
 
-        if (helperAvailable) {
+        if (attempt.helperAvailable) {
             // 录制完成后立即关闭渲染窗口，避免与 H.264 转码同时占用 GPU。
-            await closeWallpaperWindow(options.executables.wallpaperEnginePath, windowName).catch(error => {
-                options.logger.error('提前关闭 Scene 渲染窗口失败', error);
-            });
-            report({ stage: 'validate', message: '正在将 Scene 录制转换为 H.264/MP4…' });
+            await closeWallpaperWindow(options.executables.wallpaperEnginePath, attempt.windowName)
+                .catch(error => options.logger.error('提前关闭 Scene 渲染窗口失败', error));
+            attempt.report({ stage: 'validate', message: '正在将 Scene 录制转换为 H.264/MP4…' });
             const transcodeResult = await runSceneProcess(
                 options.executables.ffmpegPath,
-                buildFfmpegTranscodeArgs(options.profile, intermediateCapturePath, target.temporaryVideoPath),
+                buildFfmpegTranscodeArgs(
+                    options.profile,
+                    attempt.intermediateCapturePath,
+                    attempt.targetVideoPath
+                ),
                 {
                     signal: options.signal,
                     timeoutMs: Math.max(30_000, options.profile.durationSeconds * 5000)
@@ -344,15 +373,73 @@ export async function recordSceneToCache(options: RecordSceneOptions): Promise<S
             }
         }
 
-        report({ stage: 'validate', message: '正在验证 Scene 视频缓存…' });
+        attempt.report({ stage: 'validate', message: `正在验证 Scene ${modeLabel}录制缓存…` });
         await validateRecording(
             options.executables.ffmpegPath,
-            target.temporaryVideoPath,
+            attempt.targetVideoPath,
             options.profile.durationSeconds,
             options.signal
         );
+    } finally {
+        if (elapsedTimer) {
+            clearInterval(elapsedTimer);
+        }
+    }
+}
+
+export async function recordSceneToCache(options: RecordSceneOptions): Promise<SceneCacheEntry> {
+    const target = await createSceneCacheTarget(
+        options.cacheRoot,
+        options.source,
+        options.profile,
+        options.operationId
+    );
+    const windowName = createSceneWindowName(options.source.wallpaperId, options.operationId);
+    const intermediateCapturePath = path.join(target.cacheDir, `.${target.cacheKey}-${options.operationId}.capture.mp4`);
+    const startedAt = Date.now();
+    const report = (progress: SceneRecordingProgress): void => {
+        options.report?.(progress);
+        options.logger.info(progress.message);
+    };
+
+    try {
+        const helperAvailable = await isFile(options.captureHelperPath);
+        const modes = getSceneRecordingModes(helperAvailable);
+        let usedCompatibilityFallback = false;
+        for (const [index, mode] of modes.entries()) {
+            try {
+                await recordSceneAttempt({
+                    mode,
+                    helperAvailable,
+                    targetVideoPath: target.temporaryVideoPath,
+                    intermediateCapturePath,
+                    windowName,
+                    report,
+                    options
+                });
+                break;
+            } catch (error) {
+                if (isAbortError(error) || index === modes.length - 1) {
+                    throw error;
+                }
+                usedCompatibilityFallback = true;
+                options.logger.error('Scene 静默录制失败，准备回退到可见非激活模式', error);
+                report({
+                    stage: 'cleanup',
+                    message: '静默录制不可用，正在清理并回退到兼容录制模式…'
+                });
+                await Promise.allSettled([
+                    closeWallpaperWindow(options.executables.wallpaperEnginePath, windowName),
+                    removeTemporarySceneCache(target),
+                    fs.rm(intermediateCapturePath, { force: true })
+                ]);
+            }
+        }
         const entry = await commitSceneCache(target);
-        options.logger.info(`Scene 缓存已生成，耗时 ${Date.now() - startedAt}ms`);
+        const recordingMode = usedCompatibilityFallback
+            ? '兼容回退'
+            : helperAvailable ? '静默录制' : '兼容录制';
+        options.logger.info(`Scene 缓存已生成（${recordingMode}），耗时 ${Date.now() - startedAt}ms`);
         return entry;
     } catch (error) {
         if (isAbortError(error)) {
@@ -363,9 +450,6 @@ export async function recordSceneToCache(options: RecordSceneOptions): Promise<S
         }
         throw new SceneRecordingError('capture', 'Scene 录制失败', { cause: error });
     } finally {
-        if (elapsedTimer) {
-            clearInterval(elapsedTimer);
-        }
         report({ stage: 'cleanup', message: '正在清理 Scene 录制窗口与临时文件…' });
         await Promise.allSettled([
             closeWallpaperWindow(options.executables.wallpaperEnginePath, windowName),

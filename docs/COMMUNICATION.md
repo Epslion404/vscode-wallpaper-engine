@@ -19,7 +19,7 @@ Workbench 原有 Content-Security-Policy 会被保留。注入只向 `frame-src`
 1. 扩展激活后读取配置，并按需要启动本地服务器。
 2. 设置壁纸命令扫描创意工坊目录中的 `project.json`。`video`、`image`、`web` 和 `scene` 均进入候选列表，标题和工坊 ID 都可搜索。
 3. 选择 Scene 后，扩展检查 `globalStorageUri/scene-cache`：已有有效缓存可直接复用或重新录制；无缓存时输入 1–300 秒，留空默认 30 秒。
-4. 录制时 Wallpaper Engine 通过 `openWallpaper` 在唯一命名窗口中渲染；原生 helper 捕获该窗口，FFmpeg 转为静音 H.264/MP4（`yuv420p`、faststart）并执行视频流、时长、尺寸和黑帧验证。成功后原子提交 v2 缓存，失败或取消保留旧缓存；v1 VP8/VP9 WebM 不再兼容读取。
+4. 录制时 Wallpaper Engine 通过 `openWallpaper` 在唯一命名窗口中渲染。原生 helper 可用时先使用不激活、离屏的静默窗口；窗口探测、WGC 捕获、转码或校验失败时，清理临时输出并仅回退一次到可见非激活模式。helper 缺失时直接使用可见非激活的 `gdigrab` 兼容模式。FFmpeg 转为静音 H.264/MP4（`yuv420p`、faststart）并执行视频流、时长、尺寸和黑帧验证。成功后原子提交 v2 缓存，失败或取消保留旧缓存；v1 VP8/VP9 WebM 不再兼容读取。
 5. Scene 缓存随后按普通 Video 进入既有设置事务。服务器依次验证媒体、服务健康状态和 `/api/get-entry` 入口。
 6. 扩展补丁 Workbench HTML 的 CSP，再把引导代码注入 HTML 实际引用的 `electron-browser` 或 `electron-sandbox` `workbench.js`；旧布局才回退到 `workbench.desktop.main.js`。模块 URL 写入 `vscode-wallpaper` cache-bust 参数后请求窗口重载。
 7. 注入脚本创建 `#vscode-wallpaper-container`。壁纸层使用 `z-index: 0`，Workbench 根层使用独立的 `z-index: 1` stacking context；容器被后加载布局移除时只执行有界、幂等恢复。

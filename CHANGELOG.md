@@ -6,6 +6,14 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Added
+
+- Scene 录制在 Windows Graphics Capture helper 可用时默认使用非激活离屏窗口；静默捕获不可用时自动清理并仅回退一次到可见非激活模式。
+
+### Changed
+
+- FFmpeg `gdigrab` 兼容路径不再激活 Wallpaper Engine 窗口，并明确保持可见录制以避免离屏 GDI 捕获失败。
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

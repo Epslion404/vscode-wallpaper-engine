@@ -112,6 +112,8 @@
 ### Scene 自动录制缓存
 
 - Scene 不能直接在浏览器中播放。扩展会让 Wallpaper Engine 在独立命名窗口中渲染，再通过 Windows Graphics Capture 录制临时视频，并由 FFmpeg 转成静音 H.264/MP4 缓存（`yuv420p`、faststart）。
+- 原生捕获 helper 可用时，扩展默认使用不激活、移出桌面可见区域的静默录制窗口；若窗口探测、捕获、转码或缓存校验失败，会自动清理并仅回退一次到可见但不抢焦点的兼容模式。
+- helper 缺失时使用 FFmpeg `gdigrab` 兼容路径。该路径不会抢焦点，但需要保持专用录制窗口可见。
 - 缓存保存在扩展的 `globalStorageUri/scene-cache` 中，不修改 Steam 工坊源文件，也不会写入 VSIX。
 - 首次选择 Scene 时输入录制时长；留空采用 30 秒。再次选择同一 Scene 时可复用缓存或重新录制。
 - 录制支持取消；失败或取消会清理专用窗口和临时文件，并保留上一次有效缓存与当前壁纸。
@@ -142,7 +144,7 @@
 1. 在 `Wallpaper Engine` Output 中确认 Wallpaper Engine、FFmpeg 和原生捕获 helper 均已找到。
 2. FFmpeg 必须支持 `libx264`；可执行 `ffmpeg -encoders` 检查。
 3. 若自动检测失败，在设置中填写 `wallpaperEnginePath` 和 `ffmpegPath`，或在提示中选择对应程序。
-4. 录制期间不要最小化或主动关闭 Wallpaper Engine 的专用弹出窗口。
+4. 日志显示“静默录制”时无需操作 Wallpaper Engine 窗口；若自动回退为“兼容录制”，录制期间不要最小化或主动关闭专用窗口。
 5. 重新选择该 Scene 并选择“重新录制”；旧缓存只有在新录制校验成功后才会被替换。
 
 ### 设置完成但壁纸没有显示？
