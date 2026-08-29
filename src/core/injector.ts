@@ -4,12 +4,13 @@ import * as path from 'path';
 import { saveFilePrivileged } from './admin-saver';
 import { WallpaperType } from './types';
 import { getThemeCompatibilityCss } from './theme-compatibility';
+import { createMediaStartupController } from './media-startup';
 
 // --- 常量定义 ---
 const JS_INJECTION_REGEX = /\s*\/\* \[VSCode-Wallpaper-Injection-Start\] \*\/[\s\S]*?\/\* \[VSCode-Wallpaper-Injection-End\] \*\//g;
 const HTML_INJECTION_REGEX = /\s*<!-- VSCode-Wallpaper-Injection-Start -->[\s\S\n]*?<!-- VSCode-Wallpaper-Injection-End -->/g;
 const JS_INJECTION_MARKER = '/* [VSCode-Wallpaper-Injection-Start] */';
-const JS_INJECTION_VERSION = '5';
+const JS_INJECTION_VERSION = '6';
 const JS_INJECTION_VERSION_MARKER = `/* [VSCode-Wallpaper-Injection-Version:${JS_INJECTION_VERSION}] */`;
 
 // HTML CSP 补丁标记
@@ -270,7 +271,6 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
     if (type === WallpaperType.Video) {
         elementCreationCode = `
             el = document.createElement('video');
-            el.src = SERVER_ROOT + '/media/current';
             el.preload = 'auto';
             el.autoplay = true;
             el.loop = true;
@@ -279,81 +279,214 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
             el.playsInline = true;
             el.style.opacity = '${opacity}';
 
+            let mediaStartupController;
+            let mediaStartupStarted = false;
+            let progressTimer = 0;
+            let playbackWatchdog = 0;
+            let attemptCleanupTasks = [];
+
+            const clearAttemptRuntime = () => {
+                window.clearTimeout(progressTimer);
+                window.clearTimeout(playbackWatchdog);
+                progressTimer = 0;
+                playbackWatchdog = 0;
+                while (attemptCleanupTasks.length > 0) {
+                    attemptCleanupTasks.pop()();
+                }
+            };
+            const clearVideoSource = () => {
+                try {
+                    el.pause();
+                    el.removeAttribute('src');
+                    el.load();
+                } catch (error) {
+                    console.warn('[WP] Failed to clear video source', error);
+                }
+            };
             const videoEvents = [
                 'loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing',
                 'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended'
             ];
-            let progressTimer = 0;
-            cleanupTasks.push(() => window.clearTimeout(progressTimer));
-            videoEvents.forEach(eventName => {
-                el.addEventListener(eventName, () => {
-                    reportPlayback('loading', eventName, mediaSnapshot(el));
-                    if (eventName === 'playing') {
+            const installVideoAttempt = token => {
+                videoEvents.forEach(eventName => {
+                    const handler = () => {
+                        reportPlayback('loading', eventName, mediaSnapshot(el));
+                        if (eventName !== 'playing') return;
                         const startedAt = el.currentTime;
                         window.clearTimeout(progressTimer);
                         progressTimer = window.setTimeout(() => {
                             if (!el.paused && el.currentTime > startedAt + 0.05) {
-                                playbackReady = true;
-                                reportPlayback('ready', 'time-progress', mediaSnapshot(el));
+                                mediaStartupController.ready(token);
                             }
                         }, 750);
-                    }
+                    };
+                    el.addEventListener(eventName, handler);
+                    attemptCleanupTasks.push(() => el.removeEventListener(eventName, handler));
                 });
-            });
-            el.addEventListener('error', () => {
-                reportPlayback('error', 'media-error', {
-                    ...mediaSnapshot(el),
-                    errorCode: el.error ? el.error.code : 0,
-                    detail: el.error ? el.error.message : 'unknown media error'
-                });
-            });
-            let playbackWatchdog = 0;
-            window.reloadWallpaper = () => {
-                playbackReady = false;
-                window.clearTimeout(playbackWatchdog);
-                el.load();
-                try {
-                    Promise.resolve(el.play()).catch(error => {
-                        reportPlayback('error', 'play-rejected', {
-                            ...mediaSnapshot(el),
-                            detail: String(error)
-                        });
-                    });
-                } catch (error) {
-                    reportPlayback('error', 'play-rejected', {
+                const errorHandler = () => {
+                    const detail = el.error ? el.error.message : 'unknown media error';
+                    reportPlayback('loading', 'media-error', {
                         ...mediaSnapshot(el),
-                        detail: String(error)
+                        errorCode: el.error ? el.error.code : 0,
+                        detail
                     });
-                }
-                playbackWatchdog = window.setTimeout(() => {
-                    if (!playbackReady) {
-                        reportPlayback('error', 'watchdog-timeout', mediaSnapshot(el));
-                    }
-                }, 12000);
+                    mediaStartupController.failed(token, 'media-error: ' + detail);
+                };
+                el.addEventListener('error', errorHandler);
+                attemptCleanupTasks.push(() => el.removeEventListener('error', errorHandler));
             };
-            cleanupTasks.push(() => window.clearTimeout(playbackWatchdog));
+
+            mediaStartupController = createMediaStartupController({
+                attachSource: token => {
+                    clearAttemptRuntime();
+                    clearVideoSource();
+                    playbackReady = false;
+                    installVideoAttempt(token);
+                    const mediaUrl = SERVER_ROOT + '/media/current?generation='
+                        + token.generation + '&attempt=' + token.attempt;
+                    el.src = mediaUrl;
+                    el.load();
+                    playbackWatchdog = window.setTimeout(() => {
+                        mediaStartupController.failed(token, 'watchdog-timeout');
+                    }, 2500);
+                    return el.play();
+                },
+                schedule: (delayMs, callback) => {
+                    const timer = window.setTimeout(callback, delayMs);
+                    return () => window.clearTimeout(timer);
+                },
+                report: (event, token, detail) => {
+                    const attemptDetail = 'generation=' + token.generation
+                        + ', attempt=' + token.attempt
+                        + (detail ? ', ' + detail : '');
+                    if (event === 'ready') {
+                        playbackReady = true;
+                        clearAttemptRuntime();
+                        reportPlayback('ready', 'time-progress', mediaSnapshot(el));
+                        return;
+                    }
+                    if (event === 'retry-exhausted') {
+                        clearAttemptRuntime();
+                        clearVideoSource();
+                        reportPlayback('error', 'retry-exhausted', {
+                            ...mediaSnapshot(el),
+                            detail: attemptDetail
+                        });
+                        return;
+                    }
+                    if (event === 'retry-scheduled') {
+                        clearAttemptRuntime();
+                        clearVideoSource();
+                    }
+                    reportPlayback('loading', event, { detail: attemptDetail });
+                }
+            }, {
+                maxAttempts: 3,
+                retryDelayMs: 250
+            });
+            window.reloadWallpaper = () => {
+                if (mediaStartupStarted) {
+                    mediaStartupController.restart();
+                } else {
+                    mediaStartupStarted = true;
+                    mediaStartupController.start();
+                }
+            };
+            cleanupTasks.push(() => {
+                mediaStartupController.dispose();
+                clearAttemptRuntime();
+                clearVideoSource();
+            });
         `;
     } else if (type === WallpaperType.Image) {
         elementCreationCode = `
             el = document.createElement('img');
             el.style.opacity = '${opacity}';
-            el.addEventListener('load', () => {
-                reportPlayback('loading', 'load', {});
-                Promise.resolve(el.decode()).then(() => {
-                    playbackReady = true;
-                    reportPlayback('ready', 'decode', {});
-                }).catch(error => {
-                    reportPlayback('error', 'decode-error', { detail: String(error) });
-                });
-            });
-            el.addEventListener('error', () => {
-                reportPlayback('error', 'load-error', { detail: 'image load failed' });
+
+            let mediaStartupController;
+            let mediaStartupStarted = false;
+            let imageWatchdog = 0;
+            let attemptCleanupTasks = [];
+            const clearImageAttempt = () => {
+                window.clearTimeout(imageWatchdog);
+                imageWatchdog = 0;
+                while (attemptCleanupTasks.length > 0) {
+                    attemptCleanupTasks.pop()();
+                }
+            };
+            const clearImageSource = () => {
+                el.removeAttribute('src');
+            };
+
+            mediaStartupController = createMediaStartupController({
+                attachSource: token => {
+                    clearImageAttempt();
+                    clearImageSource();
+                    playbackReady = false;
+                    const loadHandler = () => {
+                        reportPlayback('loading', 'load', {});
+                        Promise.resolve(el.decode()).then(() => {
+                            mediaStartupController.ready(token);
+                        }).catch(error => {
+                            mediaStartupController.failed(token, 'decode-error: ' + String(error));
+                        });
+                    };
+                    const errorHandler = () => {
+                        mediaStartupController.failed(token, 'load-error');
+                    };
+                    el.addEventListener('load', loadHandler);
+                    el.addEventListener('error', errorHandler);
+                    attemptCleanupTasks.push(() => el.removeEventListener('load', loadHandler));
+                    attemptCleanupTasks.push(() => el.removeEventListener('error', errorHandler));
+                    imageWatchdog = window.setTimeout(() => {
+                        mediaStartupController.failed(token, 'watchdog-timeout');
+                    }, 2500);
+                    el.src = SERVER_ROOT + '/media/current?generation='
+                        + token.generation + '&attempt=' + token.attempt;
+                },
+                schedule: (delayMs, callback) => {
+                    const timer = window.setTimeout(callback, delayMs);
+                    return () => window.clearTimeout(timer);
+                },
+                report: (event, token, detail) => {
+                    const attemptDetail = 'generation=' + token.generation
+                        + ', attempt=' + token.attempt
+                        + (detail ? ', ' + detail : '');
+                    if (event === 'ready') {
+                        playbackReady = true;
+                        clearImageAttempt();
+                        reportPlayback('ready', 'decode', {});
+                        return;
+                    }
+                    if (event === 'retry-exhausted') {
+                        clearImageAttempt();
+                        clearImageSource();
+                        reportPlayback('error', 'retry-exhausted', { detail: attemptDetail });
+                        return;
+                    }
+                    if (event === 'retry-scheduled') {
+                        clearImageAttempt();
+                        clearImageSource();
+                    }
+                    reportPlayback('loading', event, { detail: attemptDetail });
+                }
+            }, {
+                maxAttempts: 3,
+                retryDelayMs: 250
             });
             window.reloadWallpaper = () => {
-                playbackReady = false;
-                el.removeAttribute('src');
-                el.src = SERVER_ROOT + '/media/current';
+                if (mediaStartupStarted) {
+                    mediaStartupController.restart();
+                } else {
+                    mediaStartupStarted = true;
+                    mediaStartupController.start();
+                }
             };
+            cleanupTasks.push(() => {
+                mediaStartupController.dispose();
+                clearImageAttempt();
+                clearImageSource();
+            });
         `;
     } else if (type === WallpaperType.Web) {
         const pingUrl = `http://127.0.0.1:${port}/ping`;
@@ -432,12 +565,15 @@ async function injectJs(type: WallpaperType, opacity: number, port: number, resi
     const playbackMediaType = type === WallpaperType.Video
         ? 'video'
         : type === WallpaperType.Image ? 'image' : 'web';
+    // 将通过单元测试的纯控制器原样嵌入 Workbench，避免生产注入与测试实现分叉。
+    const mediaStartupControllerSource = createMediaStartupController.toString();
     const jsInjection = `
 /* [VSCode-Wallpaper-Injection-Start] */
 ${JS_INJECTION_VERSION_MARKER}
 (function() {
     try {
-        const runtimeKey = '__vscodeWallpaperRuntimeV5';
+        const runtimeKey = '__vscodeWallpaperRuntimeV6';
+        const createMediaStartupController = ${mediaStartupControllerSource};
         let container;
         const previousRuntime = window[runtimeKey];
         if (previousRuntime && typeof previousRuntime.cleanup === 'function') {

@@ -74,7 +74,7 @@ suite('Injector security boundary', () => {
             source.indexOf('if (type === WallpaperType.Video)'),
             source.indexOf('} else if (type === WallpaperType.Image)'),
         );
-        assert.match(videoBranch, /SERVER_ROOT \+ '\/media\/current'/);
+        assert.match(videoBranch, /SERVER_ROOT \+ '\/media\/current\?generation='/);
         assert.ok(!videoBranch.includes('toVsCodeResourceUrl'));
         assert.match(videoBranch, /preload = 'auto'/);
         assert.match(videoBranch, /autoplay = true/);
@@ -82,8 +82,26 @@ suite('Injector security boundary', () => {
         assert.match(videoBranch, /muted = true/);
         assert.match(videoBranch, /playsInline = true/);
         assert.match(videoBranch, /\.load\(\)/);
-        assert.match(videoBranch, /Promise\.resolve\(el\.play\(\)\)\.catch/);
-        assert.match(videoBranch, /catch \(error\)/);
+        assert.match(videoBranch, /return el\.play\(\)/);
+        assert.match(videoBranch, /mediaStartupController\.failed\(token,/);
+    });
+
+    test('video and image defer media source attachment to the bounded startup controller', () => {
+        const videoBranch = source.slice(
+            source.indexOf('if (type === WallpaperType.Video)'),
+            source.indexOf('} else if (type === WallpaperType.Image)'),
+        );
+        const imageBranch = source.slice(
+            source.indexOf('} else if (type === WallpaperType.Image)'),
+            source.indexOf('} else if (type === WallpaperType.Web)'),
+        );
+
+        assert.match(videoBranch, /createMediaStartupController/);
+        assert.match(videoBranch, /attachSource:\s*token\s*=>[\s\S]*\/media\/current\?generation=/);
+        assert.match(imageBranch, /createMediaStartupController/);
+        assert.match(imageBranch, /attachSource:\s*token\s*=>[\s\S]*\/media\/current\?generation=/);
+        assert.match(source, /if \(window\.reloadWallpaper\) window\.reloadWallpaper\(\)/);
+        assert.match(source, /resp\.ok \|\| resp\.status === 205/);
     });
 
     test('image also uses the loopback media endpoint without embedding its absolute path', () => {
@@ -91,7 +109,7 @@ suite('Injector security boundary', () => {
             source.indexOf('} else if (type === WallpaperType.Image)'),
             source.indexOf('} else if (type === WallpaperType.Web)'),
         );
-        assert.match(imageBranch, /SERVER_ROOT \+ '\/media\/current'/);
+        assert.match(imageBranch, /SERVER_ROOT \+ '\/media\/current\?generation='/);
         assert.ok(!imageBranch.includes('toVsCodeResourceUrl'));
         assert.match(imageBranch, /window\.reloadWallpaper = \(\) =>/);
     });
@@ -111,7 +129,8 @@ suite('Injector security boundary', () => {
         assert.match(source, /lastPlaybackEvents/);
         assert.match(source, /currentTime > startedAt \+ 0\.05/);
         assert.match(source, /'ready', 'time-progress'/);
-        assert.match(source, /'error', 'watchdog-timeout'/);
+        assert.match(source, /failed\(token, 'watchdog-timeout'\)/);
+        assert.match(source, /'error', 'retry-exhausted'/);
         assert.match(source, /Promise\.resolve\(el\.decode\(\)\)/);
         assert.match(source, /'ready', 'decode'/);
         assert.match(source, /el\.onload = \(\) =>/);
@@ -121,7 +140,7 @@ suite('Injector security boundary', () => {
 
     test('runtime layering and cleanup are stable across reinjection and removal', () => {
         assert.match(source, /container\.style\.zIndex = '0'/);
-        assert.match(source, /__vscodeWallpaperRuntimeV5/);
+        assert.match(source, /__vscodeWallpaperRuntimeV6/);
         assert.match(source, /previousRuntime\.cleanup\(\)/);
         assert.match(source, /let container;/);
         assert.match(source, /if \(disposed\) return/);
@@ -160,6 +179,10 @@ suite('Injector security boundary', () => {
         );
         assert.strictEqual(
             hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:5] */'),
+            false,
+        );
+        assert.strictEqual(
+            hasCurrentInjection('/* [VSCode-Wallpaper-Injection-Start] */ /* [VSCode-Wallpaper-Injection-Version:6] */'),
             true,
         );
     });
